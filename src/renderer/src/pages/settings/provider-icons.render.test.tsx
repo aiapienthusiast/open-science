@@ -53,6 +53,15 @@ describe('ProviderKindIcon', () => {
     expect(html).toContain('%231677FF')
     expect(html).not.toContain('text-muted-foreground')
   })
+
+  it('renders the bundled Cheaper Inference provider logo', () => {
+    const html = renderToStaticMarkup(<ProviderKindIcon kindKey="official:cheaperinference" />)
+
+    expect(html).toContain('<img')
+    expect(html).toContain('%3ctitle%3eCheaper%20Inference%3c/title%3e')
+    expect(html).toContain('%236B7280')
+    expect(html).not.toContain('text-muted-foreground')
+  })
 })
 
 describe('AgentFrameworkIcon', () => {

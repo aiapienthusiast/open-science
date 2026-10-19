@@ -40,6 +40,7 @@ export type OfficialVendorId =
   | 'opencode'
   | 'openrouter'
   | 'requesty'
+  | 'cheaperinference'
 
 // A selectable endpoint for vendors that publish more than one host — e.g. a Global vs. China region
 // (MiniMax) or a separate overseas/domestic console (GLM's Z.AI vs. BigModel). Each carries its own
@@ -1722,6 +1723,80 @@ export const OFFICIAL_VENDORS: OfficialVendor[] = [
         'google/gemini-3.1-pro-preview',
         'google/gemini-3.5-flash',
         'xai/grok-4.6'
+      ]
+    }
+  },
+  // Cheaper Inference is also a multi-vendor gateway, so it follows Requesty at the end of the picker.
+  {
+    id: 'cheaperinference',
+    label: 'Cheaper Inference',
+    // Like Requesty, each curated entry declares its own capability and unknown ids stay conservative.
+    reasoningEffort: 'unsupported',
+    // Anthropic /v1/messages at the API root and the OpenAI-compatible /v1/chat/completions under
+    // `/v1`. The live catalog also lists image and video models, so ship a short curated set (no
+    // modelsListUrl) instead of a refresh that would put them in the picker.
+    apiEndpoints: ['anthropic', 'openai'],
+    baseUrl: 'https://api.cheaperinference.com',
+    openaiBaseUrl: 'https://api.cheaperinference.com/v1',
+    apiKeyUrl: 'https://cheaperinference.com/signup',
+    // Ids, context windows, and vision from https://api.cheaperinference.com/v1/models (2026-10-16).
+    models: [
+      {
+        id: 'claude-sonnet-5',
+        contextWindow: 1_000_000,
+        reasoningEffort: 'standard-5'
+      },
+      {
+        id: 'claude-opus-5.5',
+        contextWindow: 1_000_000,
+        reasoningEffort: 'standard-5'
+      },
+      {
+        id: 'claude-haiku-4.5',
+        contextWindow: 200_000,
+        reasoningEffort: 'unsupported'
+      },
+      {
+        id: 'gpt-5.5',
+        contextWindow: 1_000_000,
+        reasoningEffort: 'none-low-medium-high-xhigh'
+      },
+      {
+        id: 'gpt-5.4',
+        contextWindow: 1_000_000,
+        reasoningEffort: 'low-medium-high-xhigh'
+      },
+      {
+        id: 'gpt-5.4-mini',
+        contextWindow: 400_000,
+        reasoningEffort: 'low-medium-high-xhigh'
+      },
+      {
+        id: 'gemini-3.1-pro',
+        contextWindow: 1_048_576,
+        reasoningEffort: 'unsupported'
+      },
+      {
+        id: 'gemini-3.5-flash',
+        contextWindow: 1_000_000,
+        reasoningEffort: 'unsupported'
+      },
+      { id: 'grok-4.6', contextWindow: 500_000, reasoningEffort: 'unsupported' },
+      { id: 'deepseek-v4-flash', contextWindow: 1_000_000, reasoningEffort: 'unsupported' },
+      { id: 'glm-5.3', contextWindow: 1_000_000, reasoningEffort: 'unsupported' }
+    ],
+    // Curated like Requesty, so vision support is an explicit id list; unlisted ids stay text-only.
+    multimodal: {
+      multimodalModels: [
+        'claude-sonnet-5',
+        'claude-opus-5.5',
+        'claude-haiku-4.5',
+        'gpt-5.5',
+        'gpt-5.4',
+        'gpt-5.4-mini',
+        'gemini-3.1-pro',
+        'gemini-3.5-flash',
+        'grok-4.6'
       ]
     }
   }

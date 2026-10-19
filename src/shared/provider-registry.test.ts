@@ -117,6 +117,7 @@ describe('provider registry', () => {
     expect(isOfficialVendorId('tencenttokenplan')).toBe(true)
     expect(isOfficialVendorId('nvidia')).toBe(true)
     expect(isOfficialVendorId('requesty')).toBe(true)
+    expect(isOfficialVendorId('cheaperinference')).toBe(true)
     expect(isOfficialVendorId(undefined)).toBe(false)
     expect(isOfficialVendorId(42)).toBe(false)
   })
@@ -774,6 +775,31 @@ describe('provider registry', () => {
       slots: ['none', 'low', 'medium', 'high', 'xhigh']
     })
     expect(resolveVendorModelReasoningEffort('requesty', 'anthropic/claude-haiku-4-5')).toEqual({
+      supported: false
+    })
+  })
+
+  it('routes Cheaper Inference through both APIs after Requesty with a curated catalog', () => {
+    const requestyIndex = OFFICIAL_VENDORS.findIndex((vendor) => vendor.id === 'requesty')
+
+    expect(OFFICIAL_VENDORS[requestyIndex + 1]?.id).toBe('cheaperinference')
+    expect(resolveVendorApiEndpoints('cheaperinference')).toEqual(['anthropic', 'openai'])
+    expect(resolveVendorBaseUrl('cheaperinference')).toBe('https://api.cheaperinference.com')
+    expect(resolveVendorOpenAiBaseUrl('cheaperinference')).toBe(
+      'https://api.cheaperinference.com/v1'
+    )
+    expect(resolveVendorApiKeyUrl('cheaperinference')).toBe('https://cheaperinference.com/signup')
+    expect(resolveVendorModelsUrl('cheaperinference')).toBeUndefined()
+    expect(usesVendorAnthropicApiKeyHeader('cheaperinference')).toBe(false)
+    expect(defaultVendorModel('cheaperinference')).toBe('claude-sonnet-5')
+    expect(resolveModelContextWindow('cheaperinference', 'gpt-5.4-mini')).toBe(400_000)
+    expect(isVendorModelMultimodal('cheaperinference', 'gemini-3.5-flash')).toBe(true)
+    expect(isVendorModelMultimodal('cheaperinference', 'deepseek-v4-flash')).toBe(false)
+    expect(resolveVendorModelReasoningEffort('cheaperinference', 'gpt-5.5')).toEqual({
+      supported: true,
+      slots: ['none', 'low', 'medium', 'high', 'xhigh']
+    })
+    expect(resolveVendorModelReasoningEffort('cheaperinference', 'claude-haiku-4.5')).toEqual({
       supported: false
     })
   })
