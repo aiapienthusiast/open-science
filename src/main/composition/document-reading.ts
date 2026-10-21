@@ -1,3 +1,4 @@
+import { netFetchStandard } from '../network-fetch'
 import { realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { PENDING_UPLOAD_SESSION_ID } from '../../shared/uploads'
@@ -5,6 +6,7 @@ import { RestrictedInferenceRunner } from '../acp/restricted-inference-runner'
 import { isPathInsideWorkspace } from '../acp/workspace-path'
 import type { ApplicationEvents } from '../application-events'
 import { type ApplicationModuleBuilder } from '../application-runtime'
+import { QUIT_SHUTDOWN_BUDGET_MS } from '../lifecycle-shutdown'
 import { BookmarkRepository } from '../bookmarks/repository'
 import { BookmarkService } from '../bookmarks/service'
 import { registerLocalModelIpcHandlers } from '../desktop-surface-declarations'
@@ -26,7 +28,7 @@ import { SessionPdfSourceResolver } from '../literature/session-pdf-source-resol
 import { PDF_TRANSLATION_MODEL_REVISIONS } from '../local-models/catalog'
 import { createLocalModelApi } from '../local-models/owner'
 import { runtimeMetadata } from '../runtime-metadata'
-import { ProviderTextGenerationService } from '../settings/provider-text-generation'
+import { ProviderTextGenerationService } from '../literature/pdf-translation/text-generation'
 import type { SettingsService } from '../settings/service'
 
 import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
@@ -224,7 +226,7 @@ export async function composeDocumentReading({
       }),
       captureTarget: (model) => capturePdfTranslationAgentTarget(settingsService, model),
       captureApiTarget: (model) => capturePdfTranslationApiTarget(settingsService, model),
-      apiRunner: new ProviderTextGenerationService(),
+      apiRunner: new ProviderTextGenerationService(netFetchStandard),
       localRunner: createPdfTranslationLocalRuntime(
         join(
           runtimeMetadata().applicationPath.replace(/app\.asar$/, 'app.asar.unpacked'),
@@ -245,6 +247,9 @@ export async function composeDocumentReading({
       name: 'pdf-translation',
       capability: owner,
       start: () => owner.sweepStaleProfiles(),
+      // Cancellation drains inference and its owned process before releasing profiles and usage.
+      // The generic one-second module cap can expire before that existing shutdown finishes.
+      disposeTimeoutMs: QUIT_SHUTDOWN_BUDGET_MS,
       dispose: () => owner.shutdown()
     }
   })

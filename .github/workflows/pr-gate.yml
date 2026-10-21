@@ -457,6 +457,12 @@ jobs:
             git show "$TRUSTED_BASE_SHA:$selector" > "$TRUSTED_DIR/windows-e2e-mainline.mjs"
             node "$TRUSTED_DIR/windows-e2e-mainline.mjs"
           fi
+          # Package documentation can retain domain checks while the focused selector skips Markdown.
+          # Preserve every mainline group if the plan still selects the Windows E2E job.
+          if ! grep -q '^grep=.' "$GITHUB_OUTPUT"; then
+            echo 'grep=@pr-mainline-(projects|conversation|files|notebook|windows)(\s|$)' >> "$GITHUB_OUTPUT"
+            echo 'Windows E2E: no focused journeys; retain all mainline groups if the job is selected.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   registration:
     name: Impact registration
@@ -1105,6 +1111,10 @@ jobs:
           path: packages/notebook-network-sandbox/vendor/windows/x64/notebook-appcontainer-host.exe
           retention-days: 5
           if-no-files-found: error
+      - name: Prepare Windows update receipt compiler
+        if: ${{ contains(fromJSON(needs.preflight.outputs.plan).lanes, 'windows_runtime') && inputs.dry_run != 'windows-process' && (!fromJSON(needs.preflight.outputs.plan).windowsCoreChecks || contains(fromJSON(needs.preflight.outputs.plan).windowsCoreChecks, 'windows_runtime')) }}
+        run: >-
+          node -e "require('app-builder-lib/out/toolsets/windows').getMakeNsisPath().then(x => require('node:fs').appendFileSync(process.env.GITHUB_ENV, Object.entries({ ...x.env, NSIS_TEST_COMPILER: x.path }).map(([k, v]) => k + '=' + v).join('\n') + '\n'))"
       - name: Test Windows-specific behavior
         id: windows_runtime
         if: ${{ contains(fromJSON(needs.preflight.outputs.plan).lanes, 'windows_runtime') && inputs.dry_run != 'windows-process' && (!fromJSON(needs.preflight.outputs.plan).windowsCoreChecks || contains(fromJSON(needs.preflight.outputs.plan).windowsCoreChecks, 'windows_runtime')) }}
@@ -1113,9 +1123,21 @@ jobs:
           npx vitest run
           scripts/ci/run-windows-browser-diagnostics.test.ts
           scripts/windows-updater-certification.test.ts
+          build/packaging.test.ts
+          scripts/windows-update-handoff-uninstall.test.ts
+          src/main/update/windows-update-handoff.test.ts
+          src/main/update/electron-updater-provider-regressions.test.ts
+          src/main/update/electron-updater-strategy.test.ts
+          src/main/index-startup-failure.test.ts
           src/main/windows.test.ts
           src/main/windows-icon-assets.test.ts
           src/main/windows-powershell.test.ts
+          src/main/system-boot-identity.test.ts
+          src/main/system-boot-identity.windows.test.ts
+          src/main/update/deb-gate-recovery.test.ts
+          src/main/update/installation-executor.test.ts
+          src/main/update/installation-preparation.test.ts
+          src/main/update/installation-reboot-recovery.test.ts
           src/main/delegation/acp-execution.test.ts
           src/main/delegation/production-framework-runtime.test.ts
           src/main/acp/specialist-switch-recovery.integration.test.ts
@@ -1369,8 +1391,8 @@ jobs:
             src/main/notebook/managed-runtime-guard.test.ts \
             src/main/process-tree-darwin-recovery.test.ts \
             src/main/process-tree-evidence.macos.integration.test.ts \
-            src/main/notebook/network-sandbox-owner.macos-isolation.integration.test.ts \
-            src/main/notebook/runtime-service.macos-isolation.integration.test.ts
+            src/main/notebook/network-sandbox-owner.macos-isolation.integration.test.ts
+          node scripts/ci/run-notebook-isolation.mjs
           npx vitest run src/main/notebook/kernel-executor.test.ts \
             -t 'executes the repl loop through the production network sandbox|recovers cross-session REPL'
       - name: Test short macOS platform checks

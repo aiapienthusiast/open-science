@@ -348,6 +348,7 @@ type ElectronApp = {
   configureSessionPackageDialogs: (options?: { availableBytes?: number }) => Promise<string>
   restartWithPackage: (path: string) => Promise<Page>
   emitPackageFileOpen: (path: string) => Promise<void>
+  emitBrowserImport: (url: string) => Promise<void>
   emitSessionPackageProgress: (snapshot: PackageOperationSnapshot) => Promise<void>
   emitSkillImportApprovalRequest: (request: ConversationSkillImportApprovalRequest) => Promise<void>
   emitUpdateStatus: (status: UpdateStatus) => Promise<void>
@@ -418,7 +419,17 @@ const launchEnvironment = (
       'tmp',
       'number_of_processors',
       'processor_architecture',
-      'systemdrive'
+      'systemdrive',
+      // Keep the test display and Secret Service session when isolating Linux HOME.
+      'display',
+      'xauthority',
+      'dbus_session_bus_address',
+      'xdg_runtime_dir',
+      'xdg_current_desktop',
+      'desktop_session',
+      'gnome_desktop_session_id',
+      'kde_full_session',
+      'kde_session_version'
     ])
     for (const key of Object.keys(environment)) {
       if (!osInputs.has(key.toLowerCase()) && !key.startsWith('OPEN_SCIENCE_E2E_'))
@@ -1064,7 +1075,7 @@ class ElectronAppHarness implements ElectronApp {
               setActiveProvider: (request: { id: string; model: string }) => Promise<unknown>
               setAgentFramework: (request: { id: 'opencode' }) => Promise<unknown>
               upsertProvider: (request: {
-                apiEndpoints: ['openai']
+                apiEndpoints: ['chat-completions']
                 baseUrl: string
                 key: string
                 model: string
@@ -1078,7 +1089,7 @@ class ElectronAppHarness implements ElectronApp {
         const snapshot = await bridge.api.settings.upsertProvider({
           type: 'custom',
           name: providerName,
-          apiEndpoints: ['openai'],
+          apiEndpoints: ['chat-completions'],
           baseUrl: providerBaseUrl ?? 'http://127.0.0.1:9/v1',
           model: 'e2e-model',
           key: 'e2e-key',
@@ -1154,11 +1165,9 @@ class ElectronAppHarness implements ElectronApp {
 
   async emitSessionPackageProgress(snapshot: PackageOperationSnapshot): Promise<void> {
     // Presentation fixtures use the existing native event boundary, without a production test seam.
-    await this.runningApplication.evaluate(({ BrowserWindow }, snapshot) => {
-      BrowserWindow.getAllWindows()[0].webContents.send(
-        'sessions:package-operation-changed',
-        snapshot
-      )
+    const window = await this.runningApplication.browserWindow(this.page)
+    await window.evaluate((window, snapshot) => {
+      window.webContents.send('package-presentation:changed', snapshot)
     }, snapshot)
   }
 
@@ -1172,6 +1181,12 @@ class ElectronAppHarness implements ElectronApp {
     await this.runningApplication.evaluate(({ app }, path) => {
       app.emit('open-file', { preventDefault: () => undefined }, path)
     }, path)
+  }
+
+  async emitBrowserImport(url: string): Promise<void> {
+    await this.runningApplication.evaluate(({ app }, url) => {
+      app.emit('open-url', { preventDefault: () => undefined }, url)
+    }, url)
   }
 
   async configureSessionPackageDialogs(options?: { availableBytes?: number }): Promise<string> {

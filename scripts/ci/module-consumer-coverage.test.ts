@@ -1,62 +1,68 @@
-import { provablyStaleConsumerTests } from './consumer-retirement.mjs'
-import {
-  checkDerivedConsumers,
-  workingConsumerSource
-} from './generate-module-derived-consumers.mjs'
-import { loadDerivedConsumers, withDerivedConsumers } from './module-derived-consumers.mjs'
-import { expect, it } from 'vitest'
-import { loadModuleImpactManifest } from './load-module-impact.mjs'
+import { execFileSync } from 'node:child_process'
+import { afterEach, expect, it, vi } from 'vitest'
+import { checkModuleConsumerCoverage } from './check-module-consumer-coverage.mjs'
+import { createConsumerDependencyReader } from './consumer-retirement.mjs'
+import * as consumerSources from './generate-module-derived-consumers.mjs'
+import * as moduleImpact from './load-module-impact.mjs'
+import * as derivedConsumers from './module-derived-consumers.mjs'
 
-// This guard supplements the explicit IPC/behavioral contracts in the manifest. It does not
-// claim that imports can discover event dispatch, filesystem protocols or dynamic strings.
-// V8 coverage also instruments TypeScript's whole-tree scan; shared CI runners exceed 60s.
-it('retains every statically reachable consumer test and declared runtime-loading edge', () => {
-  const source = workingConsumerSource()
-  const manifest = loadModuleImpactManifest()
-  const { reverse, inspect: inspectConsumer } = checkDerivedConsumers(source, manifest)
-  const { modules } = withDerivedConsumers(manifest, loadDerivedConsumers())
-  const isTest = (path: string): boolean =>
-    /\.(test|spec)\.[cm]?[jt]sx?$/.test(path) && !path.startsWith('e2e/')
-  for (const [path, consumers] of reverse) {
-    if (!isTest(path) || consumers.size === 0 || !/^(src|packages)\//.test(path)) continue
-    expect(
-      Object.values(modules).some(
-        (module) => module.ownerPaths.includes(path) && module.interfacePaths.includes(path)
-      ),
-      `${path} exports shared test contracts; register it as an interface to retain consumers`
-    ).toBe(true)
-  }
-  const missing: string[] = []
-  for (const [id, module] of Object.entries(modules)) {
-    if (module.fullTestReason || id === 'i18n_catalog') continue
-    const visited = new Set(
-      module.ownerPaths.filter((path) => !isTest(path) || module.interfacePaths.includes(path))
-    )
-    const pending = [...visited]
-    while (pending.length) {
-      for (const consumer of reverse.get(pending.pop()!) ?? []) {
-        if (visited.has(consumer)) continue
-        visited.add(consumer)
-        pending.push(consumer)
+afterEach(() => vi.restoreAllMocks())
+
+it.each(['skill_package', 'specialist_package'])(
+  'retains conservative %s consumers without permitting missing dependency coverage',
+  (id) => {
+    const owner = 'packages/example/src/index.ts'
+    const historical = 'src/host.test.ts'
+    const added = 'src/new-consumer.test.ts'
+    const manifest = {
+      schemaVersion: 1,
+      modules: {
+        [id]: {
+          ownerPaths: [owner],
+          interfacePaths: [owner],
+          testFiles: { owner: [], contract: [], consumer: [historical] }
+        }
       }
     }
-    // Reject proven stale package consumers, but preserve evidence whose dependency cone is opaque.
-    // This matches Integrity: native or dynamic loading cannot prove safe retirement.
-    if (['skill_package', 'specialist_package'].includes(id)) {
-      expect(
-        provablyStaleConsumerTests(
-          {
-            ownerPaths: module.ownerPaths,
-            testFiles: { consumer: module.testFiles.consumer.filter((path) => !visited.has(path)) }
-          },
-          inspectConsumer
-        ),
-        `${id} consumer evidence must have a dependency path or incomplete dependency evidence`
-      ).toEqual([])
-    }
-    const declared = new Set(Object.values(module.testFiles).flat())
-    for (const path of visited)
-      if (isTest(path) && !declared.has(path)) missing.push(`${id} -> ${path}`)
+    const derived = { schemaVersion: 1, modules: {} }
+    const contents = new Map([
+      [owner, 'export const value = 1'],
+      [historical, 'export const fixture = 1'],
+      ['scripts/ci/module-runtime-consumers.json', '{}'],
+      ['scripts/ci/module-derived-consumers.json', JSON.stringify(derived)]
+    ])
+    const source = { files: new Set(contents.keys()), read: (path: string) => contents.get(path) }
+    vi.spyOn(consumerSources, 'workingConsumerSource').mockReturnValue(source)
+    vi.spyOn(moduleImpact, 'loadModuleImpactManifest').mockReturnValue(manifest)
+    vi.spyOn(derivedConsumers, 'loadDerivedConsumers').mockReturnValue(derived)
+    expect(createConsumerDependencyReader(source, [])(historical, new Set([owner]))).toEqual({
+      reachable: false,
+      complete: true
+    })
+    // Current independence cannot authorize deleting an opaque historical host contract.
+    expect(() => checkModuleConsumerCoverage()).not.toThrow()
+
+    source.files.add(added)
+    contents.set(added, "import { value } from '../packages/example/src/index'")
+    expect(() => checkModuleConsumerCoverage()).toThrow('Stale derived consumer index')
+
+    contents.set(added, 'export const fixture = 2')
+    contents.set('scripts/ci/module-runtime-consumers.json', JSON.stringify({ [owner]: [added] }))
+    expect(() => checkModuleConsumerCoverage()).toThrow('Stale derived consumer index')
   }
-  expect(missing, 'Regenerate derived consumers or add explicit behavioral contracts').toEqual([])
+)
+
+// Whole-tree TypeScript parsing is a structural guard, outside the application's coverage scope.
+// Run the same assertions without inheriting Vitest's V8 profiler: precise coverage makes this
+// scan exceed 120 seconds even when the uninstrumented guard finishes in a fraction of that time.
+it('retains every statically reachable consumer test and declared runtime-loading edge', () => {
+  execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `import { checkModuleConsumerCoverage } from './scripts/ci/check-module-consumer-coverage.mjs'; checkModuleConsumerCoverage()`
+    ],
+    { cwd: process.cwd(), timeout: 110_000, stdio: 'pipe' }
+  )
 }, 120_000)

@@ -426,10 +426,14 @@ describe('durable delegated process ownership', () => {
         [
           '-e',
           `
-          require('node:child_process').spawn(process.execPath, ['-e',
+          // Reap the descendant before exiting; orphan zombies otherwise depend on PID 1.
+          const { once } = require('node:events')
+          const keepAlive = setInterval(() => {}, 1000)
+          const stopped = once(process, 'SIGTERM')
+          const descendant = require('node:child_process').spawn(process.execPath, ['-e',
             'process.stdout.write(String(process.pid)); setInterval(() => {}, 1000)'
           ], { stdio: ['ignore', 'inherit', 'inherit'] })
-          setInterval(() => {}, 1000)
+          Promise.all([stopped, once(descendant, 'exit')]).then(() => clearInterval(keepAlive))
         `
         ],
         { stdio: 'pipe', env: process.env, windowsHide: true }
@@ -449,7 +453,9 @@ describe('durable delegated process ownership', () => {
         await once(unrelated.stdout, 'data')
         const cold = new DelegatedProcessOwnership(directory!)
         expect(cold.receipts(scope)).toHaveLength(1)
-        await expect(cold.recover(scope, true)).resolves.toBeUndefined()
+        // A cold scan may conservatively block while processes exit or a snapshot is incomplete.
+        // Require eventual proof, as in the macOS case above; a persistent ambiguity still fails.
+        await expect.poll(() => cold.recover(scope, true), { timeout: 5_000 }).toBeUndefined()
         expect(cold.receipts(scope)).toHaveLength(0)
         for (const pid of [child.pid!, descendantPid]) {
           expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))

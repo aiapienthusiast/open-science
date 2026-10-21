@@ -392,6 +392,7 @@ roles remain explicit in the tables above.
 
 - Use DropdownMenu for action menus, Popover for lightweight auxiliary layers, and Select for single-value selection.
 - `DropdownMenuContent`: `overscroll-contain rounded-[15px] border border-border bg-popover p-1.5 text-popover-foreground shadow-menu`; `shadow-menu` is `0 2px 8px rgb(0 0 0 / 0.08)`. Popovers may keep their domain-specific layout.
+- Shared `PopoverContent` uses `border border-border bg-popover text-popover-foreground shadow-menu`. Nested notices, forms and secondary copy use normal foreground and muted tokens; do not depend on inverse Tooltip colors. Compact Tooltips retain the shared theme-aware inverse treatment; callers must not replace it with fixed black/white colors.
 - Shared menu label: `px-2 py-1 text-xs text-muted-foreground`.
 - Shared menu items have `min-h-8`, 8px horizontal padding and 6px vertical padding; labels may wrap without a forced 32px height.
 - Shared item hover / keyboard highlight: `bg-muted text-foreground`; disabled items are non-interactive at `opacity-50`.
@@ -672,6 +673,10 @@ The upper-right pin toggles the current Session through the shared Session contr
   cancellation, or edit failures keep
   the row and show a recoverable inline error.
 - Queued messages are transient and Session-scoped. They are not persisted across renderer restart.
+  A collapsed queue still announces items needing attention. Removing an unsent item offers an
+  eight-second Undo action, retaining its captured target and attachments until restored or expired.
+  Closing with unsent queued messages requires an explicit decision to review them or force quit;
+  messages already appended to the transcript do not count as unsent.
   Bind each item to its admission Message Branch and block branch switching
   while that Session has queued work; inline message edits remain available and enter the queue as revisions so a later dispatch cannot silently retarget it. Pause queue
   dispatch while a visible root or delegated Permission request is pending. Keep the Permission
@@ -720,6 +725,12 @@ The upper-right pin toggles the current Session through the shared Session contr
   filenames. Ordinary files use the existing composer intake and remain draft attachments until
   submission; one `.science` package opens the existing Project import flow. Reject mixed package
   batches without partially attaching or importing. Respect blocked composer and Project availability.
+- Reject native drops containing folders before attachment staging or package import, including
+  folders named with a `.science` suffix. Add nothing from that batch, preserve existing attachments,
+  and show a dismissible notice directing the user to select files inside the folder instead.
+- Project Home also accepts one `.science` package across its content area with the same bounded
+  overlay. Dropping opens the existing destination Project picker, followed by the existing import
+  preview and confirmation; Home does not preselect the previously visited Project.
 - Keep the new-Session `.science` import guide and keyboard-accessible picker visible at rest.
   Ordinary file drags must not highlight that package-only guide. Clear hover feedback on leave,
   drop, cancellation, or window blur.
@@ -1074,6 +1085,30 @@ The upper-right pin toggles the current Session through the shared Session contr
 - Trailing controls retain Connector-specific retry, configure, and sign-in actions, followed by Tag assignment, the custom Connector action menu and shared Manage access popover. The custom menu orders Export, Edit, separator, Remove; removal continues to use the Specialist impact check and confirmation dialog.
 - Creating a custom OAuth Connector saves its configuration first, then immediately starts browser authorization in a cancellable dialog. Cancelling or failing authorization keeps the saved Connector disabled so the user can retry from the same dialog or finish later. Existing Connector rows reuse this dialog for sign-in rather than presenting a separate inline waiting state.
 - When a runtime refresh shows that a previously authenticated OAuth Connector has lost its tokens, the app raises one transient global notice with a shortcut back to Settings. The Connector row remains the persistent source of truth and continues to show that sign-in is required. This notice is session-local UI state: it adds no persisted status field, migration, or shared enum value.
+
+## Recoverable operations
+
+- Connector and Compute drafts participate in the shared Settings leave guard, including section
+  changes, history navigation and closing Settings. Failed submissions retain editable input;
+  asynchronous completions from a closed or replaced editor cannot navigate the current editor.
+  Invalid SSH ports remain visible when advanced settings are collapsed. Loading SSH aliases,
+  failing to load them and finding no aliases have distinct presentations with retry on failure.
+- Notification bulk-read and storage migration cancellation display pending and failure feedback.
+  Cancellation requests do not claim completion before the owning operation acknowledges it.
+- Desktop artifact downloads show processed-file progress and allow cancellation. Keep selections
+  stable while saving, wait for the actual terminal result and offer retry after cancellation errors.
+  A cancelled session batch retains successfully published files and selects only unfinished files
+  for retry; a cancelled project archive leaves the previous destination intact.
+- Notebook action errors remain visible regardless of the selected sidebar tab. Restarting R
+  requires confirmation that variables and loaded packages will be lost while saved files and
+  conversation history remain.
+- Literature import lets users exclude individual records. Selection changes recompute identity
+  matches against the selected set; pending or failed previews disable import and failures offer
+  retry. Excluded rows retain their diagnostics. Commit revalidates the selected records through
+  the existing transactional identity owner.
+- Empty global search results link to Archived settings, where archived projects and conversations
+  can be filtered by title or project. Onboarding explains why a tested model connection is needed
+  before setup can finish.
 
 ## Error notices
 

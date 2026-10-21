@@ -280,6 +280,7 @@
         "src/main/notifications/desktop-badge.ts",
         "src/main/permission-grants/capability.ts",
         "src/main/process-tree.ts",
+        "src/main/runtime-ownership.ts",
         "src/main/remote-access/remoteit.ts",
         "src/main/session-diagnostics/environment.ts",
         "src/main/settings/agent-runtime-manager.ts",
@@ -641,7 +642,6 @@
       "paths": ["test/fixtures/pdf-translation/*.json", "test/fixtures/pdf-translation/*.jsonl"],
       "tests": [
         "src/main/literature/pdf-translation/*.test.ts",
-        "src/main/settings/provider-text-generation.test.ts",
         "src/renderer/src/pages/workspace/previews/renderers/*pdf-translation*.test.ts",
         "src/renderer/src/pages/workspace/previews/renderers/*pdf-translation*.test.tsx",
         "src/shared/pdf-translation*.test.ts",

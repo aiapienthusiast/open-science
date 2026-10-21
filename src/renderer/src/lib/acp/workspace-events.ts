@@ -1,4 +1,5 @@
 import {
+  ACP_APP_CONTINUATION_FAILED_EVENT_TITLE,
   ACP_ARTIFACT_CLEANUP_FAILED_EVENT_TITLE,
   ACP_CONTEXT_COMPACTION_ACTIVITY_TOOL_NAME,
   ACP_RESTORED_PERMISSION_CLEAR_FAILED_EVENT_TITLE,
@@ -165,13 +166,12 @@ const ownsForegroundPrompt = (session: ChatSession): boolean =>
 const didCurrentToolBecomeTerminal = (
   before: ChatSession | undefined,
   after: ChatSession | undefined,
-  toolCallId: string,
   eventId: string
 ): boolean => {
   if (!after || !ownsForegroundPrompt(after)) return false
 
-  const beforeActivity = before?.activities?.find((activity) => activity.id === toolCallId)
-  const afterActivity = after.activities?.find((activity) => activity.id === toolCallId)
+  const afterActivity = after.activities?.find((activity) => activity.eventIds.includes(eventId))
+  const beforeActivity = before?.activities?.find((activity) => activity.id === afterActivity?.id)
   if (
     !afterActivity ||
     beforeActivity?.eventIds.includes(eventId) ||
@@ -818,6 +818,7 @@ const applyWorkspaceRuntimeEvent = async (
     store.upsertToolActivity({
       sessionId: event.sessionId,
       toolCallId: event.toolCallId,
+      promptExecutionId: event.promptExecutionId,
       eventId: event.id,
       timestamp: event.timestamp,
       promptMessageId: event.promptMessageId,
@@ -839,14 +840,7 @@ const applyWorkspaceRuntimeEvent = async (
     const sessionAfterToolEvent = useSessionStore
       .getState()
       .sessions.find((session) => session.id === event.sessionId)
-    if (
-      didCurrentToolBecomeTerminal(
-        sessionBeforeToolEvent,
-        sessionAfterToolEvent,
-        event.toolCallId,
-        event.id
-      )
-    ) {
+    if (didCurrentToolBecomeTerminal(sessionBeforeToolEvent, sessionAfterToolEvent, event.id)) {
       useSessionStore.getState().setAwaitingFirstAgentOutput(event.sessionId, true)
     }
     return true
@@ -1104,9 +1098,34 @@ const applyWorkspaceRuntimeEvent = async (
             ({ id }) => id === event.promptMessageId
           ) ?? activeSession?.messages.find(({ id }) => id === event.promptMessageId))
         : undefined
-      // Hidden controls have no transcript notice or Attention. Provider acceptance resolves the
-      // command early, so its later Main-authored failure needs the initiating operation surface.
-      if (prompt && isHiddenControlMessage(prompt) && !event.terminalCommitFailure)
+      // A rejected continuation may have no durable turn outcome, and rearming its question clears
+      // the Session error. Disclose it locally, but do not attach an old branch/prompt's failure to
+      // the current conversation. Hidden controls also have no transcript notice or Attention.
+      const graph = activeSession?.conversationGraph
+      const activeFrame = graph?.frames.find(({ id }) => id === graph.activeFrameId)
+      const currentQuestionContinuationFailed =
+        event.title === ACP_APP_CONTINUATION_FAILED_EVENT_TITLE &&
+        activeSession &&
+        event.promptMessageId &&
+        event.promptMessageId === getCurrentPromptMessageId(activeSession) &&
+        (!event.agentFrameId || event.agentFrameId === activeFrame?.id) &&
+        (!event.messageBranchId || event.messageBranchId === activeFrame?.activeBranchId) &&
+        activeSession.activities?.some(
+          ({ promptMessageId, elicitation, updatedAt }) =>
+            elicitation?.durable?.kind === 'agent-user-choice' &&
+            (promptMessageId ?? elicitation.durable.promptMessageId) === event.promptMessageId &&
+            (elicitation.state === 'pending' || elicitation.continuationPending === true) &&
+            // A provider can reject before acceptance and still commit a failed outcome. That
+            // outcome already explains this attempt; an older outcome must not hide a new retry.
+            !(
+              prompt?.turnOutcome?.kind === 'failed' &&
+              prompt.turnOutcome.settledAt >= (elicitation.respondedAt ?? updatedAt)
+            )
+        )
+      if (
+        (currentQuestionContinuationFailed || (prompt && isHiddenControlMessage(prompt))) &&
+        !event.terminalCommitFailure
+      )
         reportWorkspaceOperationError(event.sessionId, getEventErrorText(event))
       return true
     }

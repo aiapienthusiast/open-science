@@ -68,6 +68,8 @@ export type AppLifecycleDeps = {
   flushSessionPersistence: (
     timeoutMs?: number
   ) => Promise<RendererSessionPersistenceFlushOutcome | void>
+  // Update preparation saved while the renderer/backend were alive, before native window closure.
+  rendererPersistencePreparedForUpdate?: () => boolean
   // Local structured diagnostics remain optional for the dependency-injected lifecycle tests.
   log?: Logger
   // Drains the logger's serialized write queue after the shutdown terminal record.
@@ -99,6 +101,8 @@ export type AppLifecycleDeps = {
   // A failed remote preparation/stop must leave the desktop alive instead of orphaning its server.
   requireCleanBackendShutdown?: boolean
   onQuitError?: (error: unknown) => void
+  // Transfers an interrupted ordinary quit to the desktop's existing disconnected decision.
+  handleDisconnectedQuit?: () => boolean
   // Snapshot of sessions with running work (in-flight agent prompt or a notebook cell mid-execution),
   // used to populate the confirmation list and to skip the quit dialog when nothing is running.
   detectActiveSessions: () => ActiveSessionInfo[]
@@ -547,6 +551,10 @@ export const installAppLifecycle = (
         outcome: RendererSessionPersistenceFlushOutcome
         result: ShutdownStepOutcome
       }> => {
+        if (trigger === 'update' && deps.rendererPersistencePreparedForUpdate?.()) {
+          diagnostics?.phase(phase, { result: 'completed', preparedBeforeQuit: true })
+          return { outcome: 'completed', result: 'completed' }
+        }
         diagnostics?.phase(phase)
         try {
           const outcome =
@@ -699,8 +707,9 @@ export const installAppLifecycle = (
           } else {
             clearApplicationShutdownTrigger()
             showMainWindow()
-            if (backendFailure) deps.onQuitError?.(backendFailure)
-            if (persistenceFailureNeedsConsent && !confirmInFlight) {
+            const disconnectedQuitHandled = ordinaryQuit && deps.handleDisconnectedQuit?.()
+            if (backendFailure && !disconnectedQuitHandled) deps.onQuitError?.(backendFailure)
+            if (persistenceFailureNeedsConsent && !disconnectedQuitHandled && !confirmInFlight) {
               confirmInFlight = true
               try {
                 let choice: CloseConfirmChoice

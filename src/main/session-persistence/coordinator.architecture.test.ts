@@ -579,6 +579,7 @@ describe('Session persistence coordinator architecture', () => {
         'destructiveStartupWindowOpen',
         'exportingSessions',
         'fileIndex',
+        'hydrationCache',
         'log',
         'delegatedWorkOwner',
         'onFilesChanged',
@@ -1832,7 +1833,8 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/node-entry.test.ts',
       'src/main/desktop-runtime-session-size.integration.test.ts',
       'src/main/notebook-payload.integration.test.ts',
-      'src/main/web-service/session-payload.integration.test.ts'
+      'src/main/web-service/session-payload.integration.test.ts',
+      'src/main/composition/session-packages.test.ts'
     ])
     expect(sessionPersistence.capabilityOverlays).toEqual([
       'windows_sensitive',

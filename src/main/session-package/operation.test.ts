@@ -5,6 +5,46 @@ import { SessionPackageOperation } from './operation'
 afterEach(() => vi.useRealTimers())
 
 const session = { projectId: 'project', sessionId: 'session' }
+
+it('throttles byte-only receipt events to 150 ms while publishing task boundaries immediately', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1000)
+  const changed = vi.fn()
+  const owner = new SessionPackageOperation(changed)
+  const transfer = {
+    id: 'one',
+    filename: 'one.science',
+    state: 'receiving' as const,
+    completedBytes: 0,
+    totalBytes: 100
+  }
+  owner.setBrowserTransfers([transfer])
+  expect(changed).toHaveBeenCalledTimes(1)
+  owner.setBrowserTransfers([{ ...transfer, completedBytes: 10 }])
+  owner.setBrowserTransfers([{ ...transfer, completedBytes: 20 }])
+  expect(owner.snapshot?.browserTransfers?.[0].completedBytes).toBe(20)
+  expect(changed).toHaveBeenCalledTimes(1)
+  vi.advanceTimersByTime(150)
+  owner.setBrowserTransfers([{ ...transfer, completedBytes: 30 }])
+  expect(changed).toHaveBeenCalledTimes(2)
+  owner.setBrowserTransfers([
+    { ...transfer, completedBytes: 30 },
+    { ...transfer, id: 'two' }
+  ])
+  expect(changed).toHaveBeenCalledTimes(3)
+  owner.setBrowserTransfers([
+    { ...transfer, completedBytes: 30, state: 'cancelled' },
+    { ...transfer, id: 'two' }
+  ])
+  expect(changed).toHaveBeenCalledTimes(4)
+  owner.setBrowserTransfers([
+    { ...transfer, completedBytes: 30, state: 'cancelled' },
+    { ...transfer, id: 'two', completedBytes: 100 }
+  ])
+  expect(changed).toHaveBeenCalledTimes(5)
+  owner.setBrowserTransfers([])
+  expect(changed).toHaveBeenCalledTimes(6)
+})
 const file = {
   storageKey: 'artifacts/p/s/file',
   filename: 'result.csv',
@@ -258,4 +298,54 @@ describe('SessionPackageOperation', () => {
       result: { imported: session }
     })
   })
+})
+
+it('publishes browser transfers without claiming an import or replacing an active export', async () => {
+  const owner = new SessionPackageOperation()
+  const transfers = [
+    {
+      id: 'browser-1',
+      filename: 'study.science',
+      state: 'waiting' as const,
+      completedBytes: 0,
+      totalBytes: 5
+    }
+  ]
+  owner.setBrowserTransfers(transfers)
+  expect(sessionPackageCommandContracts.operation.result.parse(owner.snapshot)).toMatchObject({
+    browserReceiptOnly: true,
+    browserTransfers: transfers,
+    state: 'running'
+  })
+  expect(owner.active).toBe(false)
+  const completion = deferred()
+  const exporting = owner.run('export', session, () => completion.promise)
+  const id = owner.snapshot!.id
+  owner.setBrowserTransfers([{ ...transfers[0], state: 'receiving', completedBytes: 2 }])
+  expect(owner.snapshot).toMatchObject({
+    id,
+    kind: 'export',
+    browserTransfers: [{ completedBytes: 2 }]
+  })
+  completion.resolve()
+  await exporting
+})
+
+it('retains the failed import retry state when cancellation leaves publication recovery required', async () => {
+  const owner = new SessionPackageOperation()
+  const failure = new Error('Publication interrupted after commit')
+  const run = owner.run(
+    'import',
+    undefined,
+    async () => {
+      owner.cancel()
+      throw failure
+    },
+    { projectId: 'target' },
+    () => true
+  )
+  await expect(run).rejects.toBe(failure)
+  expect(owner.snapshot).toMatchObject({ state: 'failed', error: failure.message })
+  expect(owner.snapshot?.result?.recovery).toBeUndefined()
+  expect(owner.active).toBe(false)
 })

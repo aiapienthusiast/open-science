@@ -1,14 +1,19 @@
 import { initDataRoot } from '../storage-root'
 import { afterEach, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import { dialog, shell } from 'electron'
 import { createProvenanceTestFixture } from '../artifacts/provenance-test-fixtures'
 import { SessionRepository } from '../session-persistence/repository'
+import { SessionProjectionRepository } from '../session-persistence/projection'
 import { englishNativeTranslator, translateNativeMessage } from '../locale/main-process-messages'
-import { SessionPackageService } from './service'
+import { PackageImportRecoveryRequiredError, SessionPackageService } from './service'
 import { SessionPackageDesktop } from './desktop'
+import { BrowserPackageImport } from './browser-import'
+import { findBrowserImportPort } from './test-helpers/browser-import-port'
+// @ts-expect-error The published ESM entry uses a sibling browser-import.d.ts.
+import { prepareBrowserImport } from '../../../packages/open-science/browser-import.mjs'
 import { sessionPackageCommandContracts } from '../../shared/session-package'
 import * as fileIo from '../bounded-file-io'
 import * as fs from 'node:fs'
@@ -19,6 +24,8 @@ import * as fsPromises from 'node:fs/promises'
 import { c as createTar, x as extractTar } from 'tar'
 import { paceFileIo } from '../file-io-pacing'
 import { withPackageTransfer } from './transfer'
+import { initLogger, flushLogs } from '@aipoch/diagnostics/node'
+import { projectDiagnosticLog } from '../session-diagnostics/projection'
 
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>())
@@ -60,12 +67,504 @@ const createDesktop = (
   })
   return desktop
 }
+const packageFailureMessage =
+  'Could not complete the Session package operation. Check the package and available disk space, then try again.'
+const causeMessages = (error: unknown): string[] => {
+  const messages: string[] = []
+  for (let current = error; current instanceof Error; current = current.cause)
+    messages.push(current.message)
+  return messages
+}
 const fixtures: Awaited<ReturnType<typeof createProvenanceTestFixture>>[] = []
 afterEach(async () => {
   vi.restoreAllMocks()
   vi.clearAllMocks()
   await Promise.all(fixtures.splice(0).map((fixture) => fixture.dispose()))
 })
+
+it.each([
+  {
+    name: 'unversioned reference',
+    versionId: undefined,
+    notebookJson: undefined,
+    reason: 'Legacy file references must have immutable Versions before packaging.'
+  },
+  {
+    name: 'missing version',
+    versionId: 'missing-version',
+    notebookJson: undefined,
+    reason: 'Session or Notebook references missing file evidence.'
+  },
+  {
+    name: 'unrecognized parser failure',
+    versionId: undefined,
+    notebookJson: 'private-study-canary private-research-canary',
+    reason: undefined
+  }
+])(
+  'retains safe preparation diagnostics for $name',
+  async ({ versionId, notebookJson, reason }) => {
+    const fixture = await createProvenanceTestFixture()
+    fixtures.push(fixture)
+    initDataRoot(fixture.storageRoot)
+    const logDir = join(fixture.storageRoot, 'logs')
+    initLogger({ logDir, mirrorToConsole: false })
+    const sessions = new SessionRepository(fixture.storageRoot)
+    await fixture.client.project.create({ data: { id: 'project-1', name: 'Research' } })
+    await sessions.saveSession({
+      id: 'session-1',
+      projectId: 'project-1',
+      title: 'Research',
+      cwd: '',
+      status: 'idle',
+      createdAt: 1,
+      updatedAt: 2,
+      messages: [
+        {
+          id: 'message-1',
+          role: 'agent',
+          content: '',
+          status: 'complete',
+          eventIds: [],
+          createdAt: 1,
+          updatedAt: 2,
+          parts: [
+            {
+              type: 'artifact',
+              source: 'artifact',
+              id: 'artifact-1',
+              versionId,
+              name: 'private-study-canary.txt',
+              path: 'private-research-canary'
+            }
+          ]
+        }
+      ]
+    })
+    if (notebookJson) {
+      const notebookRoot = join(fixture.storageRoot, 'notebooks', 'project-1', 'session-1')
+      await mkdir(notebookRoot, { recursive: true })
+      await writeFile(join(notebookRoot, 'run.json'), notebookJson)
+    }
+    const request = { projectId: 'project-1', sessionId: 'session-1' }
+    const before = await sessions.loadSession(request.projectId, request.sessionId)
+    const service = new SessionPackageService({
+      storageRoot: fixture.storageRoot,
+      getClient: async () => fixture.client
+    })
+    const release = vi.fn()
+    const desktop = createDesktop({
+      service,
+      translate: englishNativeTranslator,
+      withDataRootWrite: async (work) => work(),
+      reserveExport: async () => release,
+      afterImport: async () => undefined
+    })
+    try {
+      const failure = await desktop.export(request).catch((error: unknown) => error)
+      if (reason) expect(causeMessages(failure)).toEqual([packageFailureMessage, reason])
+      else {
+        expect(failure).toBeInstanceOf(Error)
+        expect((failure as Error).cause).toBeInstanceOf(SyntaxError)
+        expect(((failure as Error).cause as Error).message).toContain('private-')
+      }
+      expect(desktop.operations.snapshot).toMatchObject({
+        state: 'failed',
+        progress: { phase: 'preparing' },
+        error: packageFailureMessage
+      })
+      expect(desktop.operations.active).toBe(false)
+      expect(release).toHaveBeenCalledOnce()
+      expect(dialog.showSaveDialog).not.toHaveBeenCalled()
+      expect(await sessions.loadSession(request.projectId, request.sessionId)).toEqual(before)
+      await flushLogs()
+      const logs = (await readFile(join(logDir, 'main.log'), 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .filter((record) => record.scope === 'session-package')
+      expect(JSON.stringify(logs)).not.toContain('private-study-canary')
+      expect(JSON.stringify(logs)).not.toContain('private-research-canary')
+      const warning = logs.find((record) => record.msg === 'Session package operation failed')
+      const expected = {
+        operationId: desktop.operations.snapshot!.id,
+        phase: 'preparing',
+        errorCategory: reason ? 'error' : 'syntax',
+        ...(reason ? { error: { message: reason } } : {})
+      }
+      expect(warning?.data).toEqual(expected)
+      expect(projectDiagnosticLog(warning)).toMatchObject({ diagnostics: expected })
+    } finally {
+      await desktop.close()
+      await service.close()
+      await flushLogs()
+      initDataRoot(undefined)
+    }
+  }
+)
+
+it.each([
+  { destination: 'existing', mode: 'plain' },
+  { destination: 'new', mode: 'plain' },
+  { destination: 'existing', mode: 'cancel' }
+] as const)(
+  'resumes one committed import after repeated publication failures ($destination/$mode)',
+  async ({ destination, mode }) => {
+    const source = await createProvenanceTestFixture()
+    const target = await createProvenanceTestFixture()
+    fixtures.push(source, target)
+    initDataRoot(target.storageRoot)
+    await source.client.project.create({ data: { id: 'source', name: 'Source' } })
+    await new SessionRepository(source.storageRoot).saveSession({
+      id: 'original',
+      projectId: 'source',
+      title: 'Retry committed history',
+      cwd: '',
+      status: 'idle',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 2
+    })
+    if (destination === 'existing')
+      await target.client.project.create({ data: { id: 'target', name: 'Target' } })
+    const exporter = new SessionPackageService({
+      storageRoot: source.storageRoot,
+      getClient: async () => source.client
+    })
+    const archive = join(source.storageRoot, 'committed.science')
+    await exporter.exportTo({ projectId: 'source', sessionId: 'original' }, archive)
+    const published: Array<{ projectId: string; sessionId: string }> = []
+    const configRoot = join(target.storageRoot, 'config')
+    const options = {
+      storageRoot: target.storageRoot,
+      configRoot,
+      getClient: async () => target.client,
+      onSessionPublished: async (publication: { projectId: string; sessionId: string }) => {
+        published.push({ projectId: publication.projectId, sessionId: publication.sessionId })
+        if (published.length <= (mode === 'cancel' ? 2 : 1)) {
+          if (mode === 'cancel') desktop.operations.cancel()
+          throw new Error('Publication temporarily unavailable')
+        }
+      }
+    }
+    const service = new SessionPackageService(options)
+    const importFrom = vi.spyOn(service, 'importFrom')
+    const inspect = vi.spyOn(service, 'inspect')
+    const reserve = vi.fn<(projectId: string) => Promise<() => void>>(async () => () => undefined)
+    const afterImport = vi.fn(async () => undefined)
+    const review = vi.fn(() => true)
+    const desktop = createDesktop(
+      {
+        service,
+        translate: englishNativeTranslator,
+        withDataRootWrite: async (work) => work(),
+        reserveImport: reserve,
+        afterImport
+      },
+      review
+    )
+    const request =
+      destination === 'existing' ? { projectId: 'target' } : { projectName: 'Imported' }
+    if (mode === 'plain')
+      vi.spyOn(SessionProjectionRepository.prototype, 'prepareSave').mockRejectedValueOnce(
+        new Error('Projection temporarily unavailable')
+      )
+    try {
+      const failure = await desktop
+        .import(undefined, 'client', request, archive, true)
+        .catch((error: unknown) => error)
+      expect(failure).toMatchObject({ message: packageFailureMessage, cause: expect.any(Error) })
+      expect(causeMessages(failure)).toContain(
+        mode === 'plain'
+          ? 'Projection temporarily unavailable'
+          : 'Publication temporarily unavailable'
+      )
+      expect(desktop.operations.snapshot).toMatchObject({ state: 'failed' })
+      expect(desktop.operations.snapshot?.result?.recovery).toBeUndefined()
+      const requestId = desktop.operations.snapshot!.importRequestId
+      const [witness] = await target.client.fileOriginSession.findMany()
+      expect(witness).toBeDefined()
+      const identity = { projectId: witness.projectId, sessionId: witness.sessionId }
+      expect(await target.client.fileOriginSession.count()).toBe(1)
+      expect(await target.client.session.count()).toBe(mode === 'plain' ? 0 : 1)
+      expect(await readdir(join(configRoot, 'session-package-imports'))).toHaveLength(1)
+      // Keep the original file for the ordinary retry that previously duplicated imports.
+      // Other cases also prove recovery does not depend on that file remaining available.
+      if (destination === 'new' || mode === 'cancel') await fsPromises.rm(archive)
+      desktop.respond({ action: 'retry-import', operationId: desktop.operations.snapshot!.id })
+      await vi.waitFor(() => expect(published).toHaveLength(mode === 'cancel' ? 2 : 1))
+      await vi.waitFor(() => expect(desktop.operations.snapshot?.state).toBe('failed'))
+      expect(desktop.operations.snapshot?.importRequestId).toBe(requestId)
+      expect(await target.client.fileOriginSession.count()).toBe(1)
+      if (destination === 'new') {
+        // A running app can recover on data-root reconnect before the user retries.
+        await service.recover()
+        expect(await readdir(join(configRoot, 'session-package-imports'))).toEqual([])
+      }
+      const remove = fsPromises.rm
+      const cleanup = vi.spyOn(fsPromises, 'rm').mockImplementation(async (path, ...args) => {
+        if (dirname(String(path)) === join(target.storageRoot, 'session-package-imports'))
+          throw new Error('Staging cleanup temporarily unavailable')
+        return remove(path, ...args)
+      })
+      desktop.respond({ action: 'retry-import', operationId: desktop.operations.snapshot!.id })
+      await vi.waitFor(() => expect(desktop.operations.snapshot?.state).toBe('succeeded'))
+      const snapshot = desktop.operations.snapshot!
+      expect(snapshot).toMatchObject({ cleanupPending: true, result: { imported: identity } })
+      expect(() => desktop.respond({ action: 'retry-import', operationId: snapshot.id })).toThrow(
+        'Wait for the current package operation'
+      )
+      cleanup.mockRestore()
+      await desktop.respond({ action: 'retry-cleanup', operationId: snapshot.id })
+      expect(desktop.operations.snapshot?.cleanupPending).toBe(false)
+      expect(importFrom).toHaveBeenCalledOnce()
+      expect(inspect).toHaveBeenCalledOnce()
+      expect(review).toHaveBeenCalledOnce()
+      expect(afterImport).toHaveBeenCalledExactlyOnceWith(identity, 'client', destination === 'new')
+      expect(reserve.mock.calls.map(([id]) => id)).toEqual(
+        destination === 'existing' ? ['target', 'target', 'target'] : []
+      )
+      expect(
+        published.every(
+          (item) => item.projectId === identity.projectId && item.sessionId === identity.sessionId
+        )
+      ).toBe(true)
+      await desktop.close()
+      await service.close()
+      const restarted = new SessionPackageService(options)
+      try {
+        await restarted.recover()
+        expect(await target.client.fileOriginSession.count()).toBe(1)
+        expect(await target.client.session.count()).toBe(1)
+        expect(await target.client.project.count()).toBe(1)
+        expect((await new SessionRepository(configRoot).loadAll()).sessions).toHaveLength(1)
+        expect(await readdir(join(configRoot, 'session-package-imports'))).toEqual([])
+      } finally {
+        await restarted.close()
+      }
+    } finally {
+      await desktop.close()
+      await service.close()
+      await exporter.close()
+    }
+  },
+  60_000
+)
+
+it.each(['same', 'different'] as const)(
+  'starts an explicit import as a new request for the %s destination at the same path',
+  async (destination) => {
+    const fixture = await createProvenanceTestFixture()
+    fixtures.push(fixture)
+    initDataRoot(fixture.storageRoot)
+    const archive = join(fixture.storageRoot, 'explicit.science')
+    await writeFile(archive, 'private source bytes')
+    const service = new SessionPackageService({
+      storageRoot: fixture.storageRoot,
+      getClient: async () => fixture.client
+    })
+    const resume = vi.fn(async () => ({ projectId: 'target', sessionId: 'old-import' }))
+    const nextIdentity = {
+      projectId: destination === 'same' ? 'target' : 'new-target',
+      sessionId: 'new-import'
+    }
+    const importFrom = vi
+      .spyOn(service, 'importFrom')
+      .mockRejectedValueOnce(
+        new PackageImportRecoveryRequiredError(
+          { projectId: 'target', sessionId: 'old-import' },
+          resume,
+          new Error('Publication unavailable')
+        )
+      )
+      .mockResolvedValueOnce(nextIdentity)
+    const desktop = createDesktop({
+      service,
+      translate: englishNativeTranslator,
+      withDataRootWrite: async (work) => work(),
+      afterImport: async () => undefined
+    })
+    try {
+      await expect(
+        desktop.import(undefined, undefined, { projectId: 'target' }, archive)
+      ).rejects.toMatchObject({
+        message: packageFailureMessage,
+        cause: expect.objectContaining({
+          cause: expect.objectContaining({ message: 'Publication unavailable' })
+        })
+      })
+      await expect(
+        desktop.import(
+          undefined,
+          undefined,
+          {
+            projectId: destination === 'same' ? 'target' : 'new-target'
+          },
+          archive
+        )
+      ).resolves.toEqual(nextIdentity)
+      expect(importFrom).toHaveBeenCalledTimes(2)
+      expect(resume).not.toHaveBeenCalled()
+    } finally {
+      await desktop.close()
+      await service.close()
+    }
+  }
+)
+
+it('closes during committed publication without losing its error or retained journal', async () => {
+  const fixture = await createProvenanceTestFixture()
+  fixtures.push(fixture)
+  initDataRoot(fixture.storageRoot)
+  await fixture.client.project.create({ data: { id: 'source', name: 'Source' } })
+  await new SessionRepository(fixture.storageRoot).saveSession({
+    id: 'original',
+    projectId: 'source',
+    title: 'Close committed import',
+    cwd: '',
+    status: 'idle',
+    messages: [],
+    createdAt: 1,
+    updatedAt: 2
+  })
+  let entered!: () => void
+  const publication = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const options = { storageRoot: fixture.storageRoot, getClient: async () => fixture.client }
+  const service = new SessionPackageService({
+    ...options,
+    onSessionPublished: async () => {
+      entered()
+      await gate
+      throw new Error('Publication interrupted while closing')
+    }
+  })
+  const archive = join(fixture.storageRoot, 'close.science')
+  await service.exportTo({ projectId: 'source', sessionId: 'original' }, archive)
+  const importFrom = vi.spyOn(service, 'importFrom')
+  const afterImport = vi.fn(async () => undefined)
+  const desktop = createDesktop({
+    service,
+    translate: englishNativeTranslator,
+    withDataRootWrite: async (work) => work(),
+    afterImport
+  })
+  const imported = desktop
+    .import(undefined, undefined, { projectId: 'source' }, archive)
+    .catch((error: unknown) => error)
+  try {
+    await publication
+    const closing = desktop.close()
+    release()
+    const error = await imported
+    expect(error).toBeInstanceOf(Error)
+    expect(error).toMatchObject({ message: packageFailureMessage, cause: expect.any(Error) })
+    expect(causeMessages(error)).toContain('Publication interrupted while closing')
+    await closing
+    expect(importFrom).toHaveBeenCalledOnce()
+    expect(afterImport).not.toHaveBeenCalled()
+    expect(await fixture.client.fileOriginSession.count()).toBe(1)
+    expect(await readdir(join(fixture.storageRoot, 'session-package-imports'))).toHaveLength(1)
+    await service.close()
+    const restarted = new SessionPackageService(options)
+    try {
+      await restarted.recover()
+      expect(await fixture.client.fileOriginSession.count()).toBe(1)
+      expect(await fixture.client.session.count()).toBe(1)
+      expect(await readdir(join(fixture.storageRoot, 'session-package-imports'))).toEqual([])
+    } finally {
+      await restarted.close()
+    }
+  } finally {
+    release()
+    await imported
+    await desktop.close()
+    await service.close()
+  }
+}, 60_000)
+
+it('clears an unconfirmed import only after the absent witness and its cleanup are resolved', async () => {
+  const fixture = await createProvenanceTestFixture()
+  fixtures.push(fixture)
+  initDataRoot(fixture.storageRoot)
+  await fixture.client.project.create({ data: { id: 'source', name: 'Source' } })
+  await new SessionRepository(fixture.storageRoot).saveSession({
+    id: 'original',
+    projectId: 'source',
+    title: 'Unconfirmed import',
+    cwd: '',
+    status: 'idle',
+    messages: [],
+    createdAt: 1,
+    updatedAt: 2
+  })
+  const service = new SessionPackageService({
+    storageRoot: fixture.storageRoot,
+    getClient: async () => fixture.client
+  })
+  const archive = join(fixture.storageRoot, 'unconfirmed.science')
+  await service.exportTo({ projectId: 'source', sessionId: 'original' }, archive)
+  // The driver fails before committing, and the first witness read is also unavailable.
+  vi.spyOn(fixture.client, '$transaction').mockRejectedValueOnce(
+    new Error('Commit not acknowledged')
+  )
+  vi.spyOn(fixture.client.fileOriginSession, 'findUnique').mockRejectedValueOnce(
+    new Error('Commit witness unavailable')
+  )
+  const importFrom = vi.spyOn(service, 'importFrom')
+  const desktop = createDesktop({
+    service,
+    translate: englishNativeTranslator,
+    withDataRootWrite: async (work) => work(),
+    afterImport: async () => undefined
+  })
+  try {
+    const failure = await desktop
+      .import(undefined, undefined, { projectId: 'source' }, archive)
+      .catch((error: unknown) => error)
+    expect(failure).toMatchObject({ message: packageFailureMessage, cause: expect.any(Error) })
+    expect(causeMessages(failure)).toContain('Commit witness unavailable')
+    const remove = fsPromises.rm
+    const cleanup = vi.spyOn(fsPromises, 'rm').mockImplementation(async (path, ...args) => {
+      if (dirname(String(path)) === join(fixture.storageRoot, 'session-package-imports'))
+        throw new Error('Staging cleanup unavailable')
+      return remove(path, ...args)
+    })
+    desktop.respond({ action: 'retry-import', operationId: desktop.operations.snapshot!.id })
+    await vi.waitFor(() =>
+      expect(desktop.operations.snapshot).toMatchObject({
+        state: 'failed',
+        cleanupPending: true
+      })
+    )
+    expect(importFrom).toHaveBeenCalledOnce()
+    expect(await fixture.client.fileOriginSession.count()).toBe(0)
+    expect(() =>
+      desktop.respond({
+        action: 'retry-import',
+        operationId: desktop.operations.snapshot!.id
+      })
+    ).toThrow('Wait for the current package operation')
+    cleanup.mockRestore()
+    await desktop.respond({ action: 'retry-cleanup', operationId: desktop.operations.snapshot!.id })
+    desktop.respond({ action: 'retry-import', operationId: desktop.operations.snapshot!.id })
+    await vi.waitFor(() => expect(desktop.operations.snapshot?.state).toBe('succeeded'), {
+      timeout: 10000
+    })
+    expect(importFrom).toHaveBeenCalledTimes(2)
+    expect(await fixture.client.fileOriginSession.count()).toBe(1)
+    expect(await fixture.client.session.count()).toBe(1)
+    expect(await readdir(join(fixture.storageRoot, 'session-package-imports'))).toEqual([])
+  } finally {
+    await desktop.close()
+    await service.close()
+  }
+}, 60_000)
 
 it.each(['menu', 'drop', 'open'] as const)(
   'retries the original %s package and destination without reopening either picker',
@@ -213,16 +712,19 @@ it('keeps a missing original retryable and lets the user deliberately choose ano
   }
 })
 
-it('validates dropped package commands without expanding the destination model', () => {
+it('accepts dropped packages with an existing Project or deferred destination selection', () => {
   const parse = sessionPackageCommandContracts.import.args.parse
-  expect(parse([{ projectId: 'target' }, '/data/research.SCIENCE'])).toEqual([
-    { projectId: 'target' },
-    '/data/research.SCIENCE'
-  ])
+  for (const target of [undefined, {}, { projectId: 'target' }]) {
+    const args = [target, '/data/research.SCIENCE']
+    expect(parse(args)).toEqual(args)
+  }
   for (const args of [
-    [{}, '/data/research.science'],
     [{ projectName: 'New' }, '/data/research.science'],
+    [{ projectId: '' }, '/data/research.science'],
     [{ projectId: 'target' }, '/data/data.csv'],
+    [{}, '/data/data.csv'],
+    [{}, ''],
+    [{}, `${'a'.repeat(32768)}.science`],
     [{ projectId: 'target' }, '']
   ]) {
     expect(() => parse(args)).toThrow()
@@ -286,6 +788,9 @@ it('imports a dropped package into its Project without a picker or destination p
   expect(states).toContain('copying')
   expect(states).toContain('validating')
   expect(states).toContain('confirming')
+  const importing = states.indexOf('importing')
+  expect(importing).toBeGreaterThan(states.indexOf('confirming'))
+  expect(states.slice(importing)).not.toContain('validating')
   const saved = await repo.loadSession('target', result!.sessionId)
   expect(saved?.title).toBe('Dropped research')
   expect(saved?.packageOrigin).toBeDefined()
@@ -1233,6 +1738,17 @@ it('queues OS files without reading payloads before project selection and cancel
     expect(desktop.hasActiveTransfer()).toBe(false)
     expect(JSON.stringify(desktop.operations.snapshot)).not.toContain(fixture.storageRoot)
     expect(dialog.showOpenDialog).not.toHaveBeenCalled()
+    const discarded = vi.fn()
+    await desktop.enqueueFile(join(fixture.storageRoot, 'discard.science'), discarded)
+    const requestId = desktop.operations.snapshot!.pendingImports!.find(
+      (file) => file.filename === 'discard.science'
+    )!.id
+    desktop.respond({
+      action: 'discard-import',
+      operationId: desktop.operations.snapshot!.id,
+      requestId
+    })
+    expect(discarded).toHaveBeenCalledOnce()
     const initial = desktop.operations.snapshot!
     desktop.respond({ action: 'cancel', operationId: initial.id })
     await vi.waitFor(() =>
@@ -1267,8 +1783,12 @@ it('checks project admission before copying an OS file and keeps a failed reques
     storageRoot: fixture.storageRoot,
     getClient: async () => fixture.client
   })
-  const reserve = vi.fn(async () => {
-    throw new Error('Project was archived')
+  const reserve = vi
+    .fn(async () => () => undefined)
+    .mockRejectedValueOnce(new Error('Project was archived'))
+  vi.spyOn(service, 'importFrom').mockResolvedValue({
+    projectId: 'archived',
+    sessionId: 'imported'
   })
   const copy = vi.spyOn(fileIo, 'copyFileWithinBudget')
   const desktop = new SessionPackageDesktop({
@@ -1278,8 +1798,9 @@ it('checks project admission before copying an OS file and keeps a failed reques
     reserveImport: reserve,
     afterImport: async () => undefined
   })
+  const released = vi.fn()
   try {
-    desktop.enqueueFile(input)
+    desktop.enqueueFile(input, released)
     await vi.waitFor(() => expect(desktop.operations.snapshot?.state).toBe('awaiting-selection'))
     desktop.respond({
       action: 'select-project',
@@ -1298,8 +1819,10 @@ it('checks project admission before copying an OS file and keeps a failed reques
     await vi.waitFor(() => expect(reserve).toHaveBeenCalledTimes(2))
     expect(desktop.operations.snapshot?.importTarget).toEqual({ projectId: 'archived' })
     expect(dialog.showOpenDialog).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(released).toHaveBeenCalledOnce())
   } finally {
     await desktop.close()
+    expect(released).toHaveBeenCalledOnce()
     await service.close()
   }
 })
@@ -1569,9 +2092,13 @@ it.each(['committed', 'unconfirmed'] as const)(
   }
 )
 
-it.each(['en', 'zh-Hans'] as const)(
-  'asks the user to update before importing a future package (%s)',
-  async (locale) => {
+it.each([
+  ['en', false],
+  ['zh-Hans', false],
+  ['zh-Hans', true]
+] as const)(
+  'asks the user to update before importing a future package (%s, before target: %s)',
+  async (locale, validateBeforeTarget) => {
     const fixture = await createProvenanceTestFixture()
     fixtures.push(fixture)
     initDataRoot(fixture.storageRoot)
@@ -1599,7 +2126,13 @@ it.each(['en', 'zh-Hans'] as const)(
           ? 'This Session package requires a newer version of Open Science. Update Open Science, then try importing it again.'
           : '此会话研究包需要更新版本的 Open Science。请更新 Open Science 后重新导入。'
       await expect(
-        desktop.import(undefined, undefined, { projectName: 'Research' }, archive)
+        desktop.import(
+          undefined,
+          undefined,
+          validateBeforeTarget ? {} : { projectName: 'Research' },
+          archive,
+          validateBeforeTarget
+        )
       ).rejects.toThrow(message)
       expect(desktop.operations.snapshot).toMatchObject({ state: 'failed', error: message })
       expect(afterImport).not.toHaveBeenCalled()
@@ -1776,3 +2309,121 @@ it.each(['import', 'fork', 'unrelated-failure', 'cleanup-pending', 'running'] as
 await (
   await import('../../../test/runtime-host')
 ).configureTestElectronHost(await import('electron'))
+
+it.each(['valid', 'invalid'] as const)(
+  'validates a fully received %s browser package before asking for a destination',
+  async (kind) => {
+    const fixture = await createProvenanceTestFixture()
+    initDataRoot(fixture.storageRoot)
+    fixtures.push(fixture)
+    const contents = new Uint8Array(
+      kind === 'valid'
+        ? await readFile(join(__dirname, 'fixtures/session-package-v0.31.1-minimal.science'))
+        : Buffer.from('not a package')
+    )
+    const service = new SessionPackageService({
+      storageRoot: fixture.storageRoot,
+      getClient: async () => fixture.client
+    })
+    const inspect = vi.spyOn(service, 'inspect')
+    const desktop = new SessionPackageDesktop({
+      service,
+      translate: englishNativeTranslator,
+      withDataRootWrite: async (work) => work(),
+      afterImport: async () => undefined
+    })
+    const progress: number[] = []
+    const staging = join(fixture.storageRoot, 'browser-staging')
+    const bridge = new BrowserPackageImport({
+      root: staging,
+      receive: (path, consumed) => desktop.enqueueFile(path, consumed, true),
+      onChanged: (transfers) => {
+        if (transfers[0]) progress.push(transfers[0].completedBytes)
+      }
+    })
+    const fetch = globalThis.fetch
+    const origin = 'https://research.example'
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) =>
+      fetch(input, { ...init, headers: { ...init?.headers, Origin: origin } })
+    )
+    try {
+      const transfer = prepareBrowserImport(new Blob([contents]), {
+        filename: 'browser.science',
+        origin,
+        port: await findBrowserImportPort()
+      })
+      await bridge.begin(transfer.url)
+      await expect(transfer.send()).resolves.toEqual({ received: true })
+      expect(progress.at(-1)).toBe(contents.length)
+      await vi.waitFor(() =>
+        expect(desktop.operations.snapshot?.state).toBe(
+          kind === 'valid' ? 'awaiting-selection' : 'failed'
+        )
+      )
+      expect(inspect).toHaveBeenCalledWith(
+        expect.stringContaining(await realpath(staging)),
+        expect.any(AbortSignal)
+      )
+      expect(await fixture.client.session.count()).toBe(0)
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+      if (kind === 'valid') {
+        desktop.respond({
+          action: 'select-project',
+          operationId: desktop.operations.snapshot!.id,
+          target: { projectName: 'Browser import' }
+        })
+        await vi.waitFor(() => expect(desktop.operations.snapshot?.importPreview).toBeDefined())
+        expect(desktop.operations.snapshot?.state).toBe('awaiting-selection')
+        expect(await fixture.client.session.count()).toBe(0)
+        desktop.respond({ action: 'confirm-import', operationId: desktop.operations.snapshot!.id })
+        await vi.waitFor(() => expect(desktop.operations.snapshot?.state).toBe('succeeded'))
+        expect(await fixture.client.session.count()).toBe(1)
+        await vi.waitFor(async () => expect(await readdir(staging)).toEqual([]))
+      }
+    } finally {
+      await desktop.close()
+      await bridge.close()
+      await service.close()
+    }
+  }
+)
+
+it('cancels and releases only the browser source owned by the import queue', async () => {
+  const fixture = await createProvenanceTestFixture()
+  fixtures.push(fixture)
+  initDataRoot(fixture.storageRoot)
+  const service = new SessionPackageService({
+    storageRoot: fixture.storageRoot,
+    getClient: async () => fixture.client
+  })
+  const desktop = new SessionPackageDesktop({
+    service,
+    translate: englishNativeTranslator,
+    withDataRootWrite: async (work) => work(),
+    afterImport: async () => undefined
+  })
+  const first = join(fixture.storageRoot, 'first.science')
+  const second = join(fixture.storageRoot, 'second.science')
+  const contents = await readFile(
+    join(__dirname, 'fixtures/session-package-v0.31.1-minimal.science')
+  )
+  await writeFile(first, contents)
+  await writeFile(second, contents)
+  const released: string[] = []
+  try {
+    await desktop.enqueueFile(first, () => released.push('first'), true)
+    await vi.waitFor(() => expect(desktop.operations.snapshot?.state).toBe('awaiting-selection'))
+    await desktop.enqueueFile(second, () => released.push('second'), true)
+    await desktop.cancelReceivedFile(second)
+    expect(released).toEqual(['second'])
+    expect(desktop.operations.snapshot?.pendingImports).toEqual([])
+    expect(desktop.operations.snapshot?.state).toBe('awaiting-selection')
+    await desktop.cancelReceivedFile(first)
+    expect(released).toEqual(['second', 'first'])
+    expect(desktop.operations.snapshot?.state).toBe('cancelled')
+    expect(await fixture.client.session.count()).toBe(0)
+  } finally {
+    await desktop.close()
+    await service.close()
+  }
+})

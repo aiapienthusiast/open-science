@@ -368,6 +368,7 @@ describe('Reviewer orchestrator architecture', () => {
     ).toEqual([
       { publicPath: 'reviewer.abortFixLoop', channel: 'reviewer:abort-fix-loop', kind: 'method' },
       { publicPath: 'reviewer.getForSession', channel: 'reviewer:get-for-session', kind: 'method' },
+      { publicPath: 'reviewer.getReviewLog', channel: 'reviewer:get-review-log', kind: 'method' },
       { publicPath: 'reviewer.onFixLoopEnd', channel: 'reviewer:fix-loop-end', kind: 'event' },
       { publicPath: 'reviewer.onFixLoopStart', channel: 'reviewer:fix-loop-start', kind: 'event' },
       {
@@ -559,6 +560,7 @@ describe('Reviewer orchestrator architecture', () => {
           'src/main/uploads/attachment-media.pdf-preview.test.ts'
         ],
         consumer: [
+          'src/main/composition/session-packages.test.ts',
           'src/main/storage/wsl-npm-migration.integration.test.ts',
           'src/main/composition/notebook-environment.test.ts',
           'src/main/composition/reviewer.test.ts',
@@ -781,7 +783,7 @@ describe('Reviewer orchestrator architecture', () => {
           'src/main/settings/ipc.test.ts',
           'src/main/settings/network-proxy-settings.test.ts',
           'src/main/settings/provider-transport-owner.test.ts',
-          'src/main/settings/responses-bridge.integration.test.ts',
+          'src/main/settings/responses-to-chat-completions-bridge.integration.test.ts',
           'src/main/settings/runtime-application-commands.test.ts',
           'src/main/settings/service.connectors.test.ts',
           'src/main/settings/service.providers.test.ts',

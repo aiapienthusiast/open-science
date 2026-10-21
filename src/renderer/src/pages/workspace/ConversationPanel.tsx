@@ -1,3 +1,5 @@
+import { isAgentAuthenticationRequired } from './agent-authentication-error'
+import { pendingWorkspaceElicitations } from '@/lib/acp/useWorkspaceElicitation'
 import { useWorkspaceOperationErrors } from '@/lib/acp/workspace-operation-error'
 import {
   PackageExportProgressButton,
@@ -747,7 +749,6 @@ const ConversationPanel = ({
   const specialistItems = useSpecialistStore((state) => state.items)
   const catalogSkills = useSettingsStore((state) => state.skills)
   const settingsLoaded = useSettingsStore((state) => state.isLoaded)
-  const openSettings = useSettingsStore((state) => state.openSettings)
   const openSettingsToComputeHost = useSettingsStore((state) => state.openSettingsToComputeHost)
   const openSettingsToPanel = useSettingsStore((state) => state.openSettingsToPanel)
   const [messageQueueExpanded, setMessageQueueExpanded] = useState(false)
@@ -993,15 +994,22 @@ const ConversationPanel = ({
   )
   const resumeDiagnostic =
     operationDiagnostic?.message === actionError ? operationDiagnostic : undefined
-  const resolvedActionError =
-    (isClaudeCliCompatibilityError(actionError ?? '')
-      ? t(
-          'The installed Claude Code CLI is incompatible or its version could not be verified. Update Claude Code to 2.1.118 or later, then re-detect it in Settings.'
-        )
-      : undefined) ??
-    localizeImageAnnotationSourceError(actionError, t) ??
-    localizeVisionRunFailure(actionError, t) ??
-    actionError
+  const authenticationRequired = [
+    actionError,
+    composerError,
+    currentTurnOutcome?.outcome.kind === 'failed' ? currentTurnOutcome.outcome.error : undefined,
+    showLegacyRunError ? legacyDisplayState?.error : undefined
+  ].some(isAgentAuthenticationRequired)
+  const resolvedActionError = isAgentAuthenticationRequired(actionError)
+    ? undefined
+    : ((isClaudeCliCompatibilityError(actionError ?? '')
+        ? t(
+            'The installed Claude Code CLI is incompatible or its version could not be verified. Update Claude Code to 2.1.118 or later, then re-detect it in Settings.'
+          )
+        : undefined) ??
+      localizeImageAnnotationSourceError(actionError, t) ??
+      localizeVisionRunFailure(actionError, t) ??
+      actionError)
   let resumeErrorDescription = resolvedActionError
   if (resumeDiagnostic && resolvedActionError) {
     if (/timed out/i.test(resumeDiagnostic.detail)) {
@@ -1034,7 +1042,9 @@ const ConversationPanel = ({
     isUnsupportedCodexAcpVersionError(legacyDisplayState?.error) ||
     isCodexCliCompatibilityError(legacyDisplayState?.error)
   const showLegacyRunErrorRow =
-    showLegacyRunError && (!showSessionRecovery || hasUnsupportedCodexRunError)
+    !isAgentAuthenticationRequired(legacyDisplayState?.error) &&
+    showLegacyRunError &&
+    (!showSessionRecovery || hasUnsupportedCodexRunError)
   const showCodexSettings =
     isUnsupportedCodexAcpVersionError(actionError) ||
     isCodexCliCompatibilityError(actionError) ||
@@ -1089,29 +1099,11 @@ const ConversationPanel = ({
       ?.elicitation?.state
     return state === undefined || state === 'pending'
   })
-  const pendingElicitationActivity = livePendingElicitationRequest
-    ? sessionActivities.find((activity) => activity.id === livePendingElicitationRequest.toolCallId)
-    : sessionActivities.find(
-        (activity) =>
-          activity.elicitation?.state === 'pending' &&
-          activity.elicitation.durable?.kind === 'agent-user-choice'
-      )
-  const restoredElicitation = pendingElicitationActivity?.elicitation
   const pendingElicitationRequest: PendingElicitationRequest | undefined =
-    livePendingElicitationRequest ??
-    (activeSession &&
-    pendingElicitationActivity &&
-    restoredElicitation?.state === 'pending' &&
-    restoredElicitation.durable
-      ? {
-          requestId: restoredElicitation.durable.requestId,
-          sessionId: activeSession.id,
-          toolCallId: pendingElicitationActivity.id,
-          message: restoredElicitation.message,
-          fields: restoredElicitation.fields,
-          durable: restoredElicitation.durable
-        }
-      : undefined)
+    livePendingElicitationRequest ?? pendingWorkspaceElicitations(activeSession)[0]
+  const pendingElicitationActivity = pendingElicitationRequest
+    ? sessionActivities.find((activity) => activity.id === pendingElicitationRequest.toolCallId)
+    : undefined
   const pendingElicitation: ElicitationProjection | undefined =
     pendingElicitationActivity?.elicitation?.state === 'pending'
       ? pendingElicitationActivity.elicitation
@@ -1697,7 +1689,11 @@ const ConversationPanel = ({
                     )}
                   />
                 ) : null}
-                {currentTurnOutcome ? (
+                {currentTurnOutcome &&
+                !(
+                  currentTurnOutcome.outcome.kind === 'failed' &&
+                  isAgentAuthenticationRequired(currentTurnOutcome.outcome.error)
+                ) ? (
                   <TurnOutcomeNotice
                     promptMessageId={currentTurnOutcome.promptMessageId}
                     outcome={currentTurnOutcome.outcome}
@@ -1710,7 +1706,9 @@ const ConversationPanel = ({
                     session={activeSession}
                   />
                 ) : null}
-                {composerError && composerError !== actionError ? (
+                {composerError &&
+                !isAgentAuthenticationRequired(composerError) &&
+                composerError !== actionError ? (
                   <div role="alert" className="mb-2">
                     <ErrorNotice inline icon={AlertTriangle} tone="red" title={composerError} />
                   </div>
@@ -1728,6 +1726,19 @@ const ConversationPanel = ({
                     isDisabled={!canResumeSession || isStopping || rootTurnBusy}
                     isResuming={isResuming}
                     onResume={() => void handleResume()}
+                  />
+                ) : null}
+                {authenticationRequired ? (
+                  <ErrorNotice
+                    className="mb-2"
+                    title={t('Sign in to continue this conversation')}
+                    description={t(
+                      'The agent requires authentication. Open Model settings and sign in to your provider, then retry. Your conversation and draft are preserved.'
+                    )}
+                    primaryButton={{
+                      label: t('Model settings'),
+                      onClick: () => openSettingsToPanel('model')
+                    }}
                   />
                 ) : null}
                 {activeSession?.compacting ? (
@@ -1835,7 +1846,7 @@ const ConversationPanel = ({
                   <SubagentAvailabilityNotice
                     unavailable={subagentUnavailable}
                     onTurnOnDelegation={() => setAgentControlsOpenRequest((request) => request + 1)}
-                    onOpenSettings={openSettings}
+                    onOpenSettings={() => openSettingsToPanel('model')}
                   />
                 ) : null}
 

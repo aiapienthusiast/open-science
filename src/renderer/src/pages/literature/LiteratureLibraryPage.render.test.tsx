@@ -1,12 +1,13 @@
+// @vitest-environment jsdom
+import { createLiteratureTestRenderer } from '../../../../../test/renderer/literature'
+import { literatureRendererHost } from '@/lib/literature-renderer-host'
 import { FocusScope } from '@radix-ui/react-focus-scope'
 import { configureTestRuntimeMetadata } from '../../../../../test/runtime-metadata'
 import { literatureDeletionError } from '../../../../shared/literature-deletion'
 import type { PdfAnnotation } from '../../../../shared/pdf-annotations'
 import * as annotationReveal from '../workspace/annotations/annotation-reveal'
-// @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 import { i18next } from '@/i18n'
 import { useNavigationStore } from '@/stores/navigation-store'
 import type { PreviewFileItem } from '@/stores/preview-workbench-store'
@@ -31,7 +32,9 @@ import type { LiteratureCatalogSearchPage } from '../../../../shared/literature'
 import type { Project } from '../../../../shared/projects'
 import { LiteratureLibraryPage } from './LiteratureLibraryPage'
 import { LiteratureSearchInput } from './list/LiteratureSearchInput'
-import { useAttachmentOperations } from './workflows/literature-attachment-operations'
+
+// Integration: exercise the real navigation, project and preview adapters.
+const { render } = createLiteratureTestRenderer(literatureRendererHost)
 
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = (): void => undefined
@@ -260,7 +263,6 @@ describe('LiteratureLibraryPage', () => {
   const saveBlobFile = vi.fn()
 
   beforeEach(() => {
-    useAttachmentOperations.setState({ operations: [] })
     useSessionStore.setState(createInitialSessionState())
     // Failed assertions must not leak unused one-shot IPC replies into another scenario.
     search.mockReset()
@@ -376,9 +378,11 @@ describe('LiteratureLibraryPage', () => {
           : {})
       })
     )
-    completeLiteraturePdfDraft.mockImplementation(async (draft: LiteratureItemInput) => draft)
-    extractLiteraturePdfDraft.mockImplementation((_file: File, fallback: LiteratureItemInput) =>
-      Promise.resolve(fallback)
+    completeLiteraturePdfDraft.mockImplementation(
+      async (_api: unknown, draft: LiteratureItemInput) => draft
+    )
+    extractLiteraturePdfDraft.mockImplementation(
+      (_api: unknown, _file: File, fallback: LiteratureItemInput) => Promise.resolve(fallback)
     )
     completeMetadata.mockImplementation((request: { mode: 'commit' | 'preview' }) => {
       const completedItem = {
@@ -423,6 +427,7 @@ describe('LiteratureLibraryPage', () => {
         platform: 'darwin',
         saveBlobFile,
         literature: {
+          getCandidateStates: vi.fn(async () => ({ candidates: [] })),
           journals: vi.fn(async () => ({ datasets: [], matches: [] })),
           exportRecord: vi.fn(),
           sources: vi.fn(async () => []),
@@ -592,6 +597,7 @@ describe('LiteratureLibraryPage', () => {
     const title = await screen.findByLabelText('Title')
     expect((title as HTMLInputElement).value).toBe('workspace paper')
     expect(extractLiteraturePdfDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ api: window.api }),
       source,
       expect.anything(),
       expect.any(Function)
@@ -4416,6 +4422,7 @@ describe('LiteratureLibraryPage', () => {
     (action) => {
       const startPendingAction = async (): Promise<{
         detail: HTMLElement
+        remount: () => void
         finish: (error?: Error) => Promise<void>
       }> => {
         const entry = createLibraryItemWithPdf()
@@ -4434,7 +4441,7 @@ describe('LiteratureLibraryPage', () => {
           reject = fail
         })
         transact.mockImplementation(() => pending)
-        render(<LiteratureLibraryPage />)
+        const view = render(<LiteratureLibraryPage />)
         fireEvent.click(screen.getByRole('button', { name: 'All references' }))
         const detail = await openReferenceDetail(
           await within(await screen.findByRole('table')).findByText(entry.item.title)
@@ -4449,6 +4456,10 @@ describe('LiteratureLibraryPage', () => {
         await waitFor(() => expect(transact).toHaveBeenCalledTimes(1))
         return {
           detail,
+          remount: () => {
+            view.rerender(<></>)
+            view.rerender(<LiteratureLibraryPage />)
+          },
           finish: async (error) => {
             await act(async () => {
               if (error) reject(error)
@@ -4523,10 +4534,9 @@ describe('LiteratureLibraryPage', () => {
       })
 
       it('retains admission when the entire library page remounts', async () => {
-        const { finish } = await startPendingAction()
+        const { finish, remount } = await startPendingAction()
         try {
-          cleanup()
-          render(<LiteratureLibraryPage />)
+          remount()
           fireEvent.click(screen.getByRole('button', { name: 'All references' }))
           fireEvent.click(
             await within(await screen.findByRole('table')).findByText(libraryItem.item.title)
@@ -8160,6 +8170,80 @@ describe('LiteratureLibraryPage', () => {
       'commit',
       'preview'
     ])
+  })
+
+  it('imports explicitly selected references and retains excluded conflict diagnostics', async () => {
+    const conflict = { ...libraryItem.item, title: 'Conflicting reference' }
+    const content = 'mixed references'
+    importRecords.mockImplementation(async (request: { mode: 'commit' | 'preview' }) => ({
+      format: 'bibtex',
+      items: [libraryItem.item, conflict],
+      errors: [],
+      scannedEntries: 2,
+      truncated: false,
+      entries: [
+        {
+          index: 0,
+          title: libraryItem.item.title,
+          item: libraryItem.item,
+          warnings: [],
+          status: 'ready'
+        },
+        {
+          index: 1,
+          title: conflict.title,
+          item: conflict,
+          warnings: [],
+          status: 'conflict',
+          conflict: {
+            identifiers: conflict.identifiers,
+            matches: [{ itemId: 'other', title: 'Other reference' }]
+          }
+        }
+      ],
+      ...(request.mode === 'commit'
+        ? { imported: { itemIds: [libraryItem.id], createdCount: 1, reusedCount: 0 } }
+        : {})
+    }))
+    render(<LiteratureLibraryPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'All references' }))
+    const file = new File([content], 'references.bib')
+    Object.defineProperty(file, 'text', { value: async () => content })
+    fireEvent.change(screen.getByLabelText('Import references'), { target: { files: [file] } })
+    const submit = (await screen.findByRole('button', {
+      name: 'Import references'
+    })) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Exclude conflicting references' }))
+    expect(submit.disabled).toBe(true)
+    await waitFor(() => expect(submit.disabled).toBe(false))
+    expect(
+      (
+        screen.getByRole('checkbox', {
+          name: 'Select reference 2: Conflicting reference'
+        }) as HTMLInputElement
+      ).checked
+    ).toBe(false)
+    fireEvent.click(submit)
+    await waitFor(() =>
+      expect(importRecords).toHaveBeenCalledWith({
+        mode: 'commit',
+        content,
+        selectedItemIndexes: [0]
+      })
+    )
+    expect(
+      await screen.findByText('Excluded references were not imported. Their details remain below.')
+    ).not.toBeNull()
+    expect(screen.getByText('Library reference: Other reference')).not.toBeNull()
+    expect((screen.getByText(/View details/).closest('details') as HTMLDetailsElement).open).toBe(
+      true
+    )
+    const excluded = screen.getByRole('checkbox', {
+      name: 'Select reference 2: Conflicting reference'
+    }) as HTMLInputElement
+    expect(excluded.disabled).toBe(true)
+    expect(excluded.checked).toBe(false)
   })
 
   it('previews and imports BibTeX records into the Library', async () => {

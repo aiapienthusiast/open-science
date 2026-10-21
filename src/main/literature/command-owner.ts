@@ -1,5 +1,4 @@
 import type { LiteratureCitationFormatter } from '@aipoch/literature-citations'
-import type { LiteratureCitationStyleLibrary } from '@aipoch/literature-citations/styles'
 import type {
   LiteratureBatchJobs,
   LiteratureFullTextFinder,
@@ -24,14 +23,9 @@ import { transactLiterature } from './transact'
 type LiteratureCommandServices = Readonly<{
   journalAttributes: Pick<JournalAttributes, 'run'>
   literatureBatchJobs: Pick<LiteratureBatchJobs, 'run'>
-  literatureCitationStyles: Pick<LiteratureCitationStyleLibrary, 'list' | 'import' | 'delete'>
   literatureCitationFormatter: Pick<
     LiteratureCitationFormatter,
-    | 'formatStyleExample'
-    | 'invalidateStyles'
-    | 'formatReferences'
-    | 'exportReferences'
-    | 'parseReferences'
+    'citationStyles' | 'formatReferences' | 'exportReferences' | 'parseReferences'
   >
   literatureReferenceResolver: Pick<LiteratureReferenceResolver, 'resolve'>
   literatureMetadataEnricher: Pick<LiteratureMetadataEnricher<LiteratureItemView>, 'complete'>
@@ -48,6 +42,7 @@ type LiteratureCommandServices = Readonly<{
   literatureCitationDocument: Pick<LiteratureCitationDocument, 'reformat'>
   literatureCatalog: Pick<
     LiteratureCatalog,
+    | 'getCandidateStates'
     | 'getMany'
     | 'exportRecord'
     | 'get'
@@ -65,7 +60,6 @@ type LiteratureCommandServices = Readonly<{
 export const createLiteratureCommandOwner = ({
   journalAttributes,
   literatureBatchJobs,
-  literatureCitationStyles,
   literatureCitationFormatter,
   literatureReferenceResolver,
   literatureMetadataEnricher,
@@ -77,31 +71,11 @@ export const createLiteratureCommandOwner = ({
   literaturePdfImporter,
   contentRepository
 }: LiteratureCommandServices): LiteratureCommandOwner => ({
+  getCandidateStates: (request) => literatureCatalog.getCandidateStates(request),
   journals: (request) => journalAttributes.run(request),
   jobs: (request) => literatureBatchJobs.run(request),
   citationStyles: (request) =>
-    withCitationStyleErrors(async () => {
-      if (request.kind === 'preview') {
-        const [styles, preview] = await Promise.all([
-          literatureCitationStyles.list(),
-          literatureCitationFormatter.formatStyleExample(request.styleId)
-        ])
-        return { styles, preview: { styleId: request.styleId, ...preview } }
-      }
-      let changedStyleId: string | undefined
-      if (request.kind === 'import') {
-        changedStyleId = await literatureCitationStyles.import(request.content)
-        literatureCitationFormatter.invalidateStyles()
-      } else if (request.kind === 'delete') {
-        await literatureCitationStyles.delete(request.styleId)
-        changedStyleId = request.styleId
-        literatureCitationFormatter.invalidateStyles()
-      }
-      return {
-        styles: await literatureCitationStyles.list(),
-        ...(changedStyleId ? { changedStyleId } : {})
-      }
-    }),
+    withCitationStyleErrors(() => literatureCitationFormatter.citationStyles(request)),
   lookupMetadata: async (doi) => {
     const [resolved] = await literatureReferenceResolver.resolve([
       doi.startsWith('pmid:') ? doi : 'doi:' + doi
@@ -208,18 +182,54 @@ export const createLiteratureCommandOwner = ({
     const { warnings, ...parsed } = await literatureCitationFormatter.parseReferences(
       request.content
     )
-    const entries = await literatureCatalog.inspectImportItems(
-      parsed.items,
-      parsed.errors,
-      warnings
+    const indexes = request.selectedItemIndexes
+    if (
+      indexes &&
+      (indexes.length === 0 ||
+        new Set(indexes).size !== indexes.length ||
+        indexes.some(
+          (index) => !Number.isInteger(index) || index < 0 || index >= parsed.items.length
+        ))
     )
+      throw new Error('Import selection is invalid. Preview the file again.')
+    // Preserve source order and recheck selected identities in the existing write transaction.
+    const selected = indexes ? new Set(indexes) : undefined
+    const items = selected ? parsed.items.filter((_, index) => selected.has(index)) : parsed.items
+    const sourceIndexes = parsed.items
+      .map((_, index) => index)
+      .filter((index) => !selected || selected.has(index))
+    const inspected = await literatureCatalog.inspectImportItems(
+      items,
+      parsed.errors,
+      sourceIndexes.map((index) => warnings?.[index] ?? [])
+    )
+    const entries = selected
+      ? inspected.map((entry) => ({
+          ...entry,
+          ...(entry.conflict
+            ? {
+                conflict: {
+                  ...entry.conflict,
+                  matches: entry.conflict.matches.map((match) =>
+                    typeof match.inputIndex === 'number'
+                      ? { ...match, inputIndex: sourceIndexes[match.inputIndex]! }
+                      : match
+                  )
+                }
+              }
+            : {}),
+          index: entry.item
+            ? sourceIndexes[entry.index]!
+            : parsed.items.length + entry.index - items.length
+        }))
+      : inspected
     if (request.mode === 'preview') return { ...parsed, entries }
-    if (parsed.items.length === 0) throw new Error('No valid references were found.')
+    if (items.length === 0) throw new Error('No valid references were found.')
     return {
       ...parsed,
       entries,
       imported: await literatureCatalog.importItems(
-        parsed.items,
+        items,
         request.collectionId,
         request.duplicatePolicy
       )

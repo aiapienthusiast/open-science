@@ -88,6 +88,7 @@
       "src/main/connectors/runtime-settings-projection.test.ts",
       "src/main/connectors/service.test.ts",
       "src/main/credential-identity/ciphertext-inventory.test.ts",
+      "src/main/credential-identity/inventory-handoff.test.ts",
       "src/main/credential-identity/linux.test.ts",
       "src/main/credential-identity/macos.test.ts",
       "src/main/credential-identity/persistence.test.ts",
@@ -252,7 +253,9 @@
       "src/main/node-entry.test.ts",
       "src/main/desktop-runtime-session-size.integration.test.ts",
       "src/main/notebook-payload.integration.test.ts",
-      "src/main/web-service/session-payload.integration.test.ts"
+      "src/main/web-service/session-payload.integration.test.ts",
+      "src/main/composition/session-packages.test.ts",
+      "src/main/settings/list-models.test.ts"
     ]
   },
   "capabilityOverlays": [],

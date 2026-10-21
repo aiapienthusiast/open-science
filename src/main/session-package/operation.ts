@@ -14,6 +14,7 @@ import {
   formatPackageBytes
 } from '../../shared/session-package'
 import type {
+  BrowserPackageTransfer,
   PackageOperationRequest,
   PackageOperationSnapshot,
   PackageProgress,
@@ -36,6 +37,7 @@ export class SessionPackageOperation {
   private importResponse?: (target?: SessionPackageImportRequest) => void
   private pendingImports: NonNullable<PackageOperationSnapshot['pendingImports']> = []
   private importQueueFull = false
+  private browserTransfers: BrowserPackageTransfer[] = []
   private selection?: (selection: PackageFileSelection) => void
   private lastProgressAt = 0
   private autoRate = PACKAGE_DEFAULT_IO_BYTES_PER_SECOND
@@ -53,6 +55,7 @@ export class SessionPackageOperation {
     return this.current
       ? structuredClone({
           ...this.current,
+          browserTransfers: this.browserTransfers,
           pendingImports: this.pendingImports,
           importQueueFull: this.importQueueFull
         })
@@ -147,6 +150,45 @@ export class SessionPackageOperation {
       presentationRevision: (this.current.presentationRevision ?? 0) + 1
     }
     this.publish()
+  }
+
+  setBrowserTransfers(transfers: BrowserPackageTransfer[]): void {
+    const added = transfers.some((t) => !this.browserTransfers.some((old) => old.id === t.id))
+    const boundary =
+      transfers.length !== this.browserTransfers.length ||
+      transfers.some((t, i) => {
+        const previous = this.browserTransfers[i]
+        return (
+          t.id !== previous?.id ||
+          t.state !== previous.state ||
+          t.cleanupPending !== previous.cleanupPending ||
+          (t.completedBytes === t.totalBytes && previous.completedBytes !== t.completedBytes)
+        )
+      })
+    this.browserTransfers = transfers
+    // Receipt presentation does not acquire the single import/export operation owner.
+    if (!this.current || this.current.browserReceiptOnly) {
+      if (!this.current && !transfers.length) return
+      this.current = {
+        id: this.current?.id ?? randomUUID(),
+        kind: 'import',
+        browserReceiptOnly: true,
+        state: transfers.some(
+          (t) => (t.state !== 'cancelled' && t.state !== 'failed') || t.cleanupPending
+        )
+          ? 'running'
+          : transfers.some((t) => t.state === 'failed')
+            ? 'failed'
+            : 'cancelled',
+        progress: { phase: 'preparing' },
+        presentationRevision: this.current?.presentationRevision ?? 0
+      }
+    }
+    if (added || boundary || Date.now() - this.lastProgressAt >= 150) {
+      this.lastProgressAt = Date.now()
+      if (added) this.present()
+      else this.publish()
+    }
   }
 
   setPendingImports(
@@ -401,7 +443,8 @@ export class SessionPackageOperation {
     kind: PackageOperationSnapshot['kind'],
     session: SessionPackageRequest | undefined,
     work: (signal: AbortSignal) => Promise<T>,
-    importTarget?: PackageOperationSnapshot['importTarget']
+    importTarget?: PackageOperationSnapshot['importTarget'],
+    requiresRecovery?: () => boolean
   ): Promise<T> {
     if (this.controller) throw new Error('A Session package operation is already in progress.')
     const controller = new AbortController()
@@ -438,15 +481,16 @@ export class SessionPackageOperation {
       return result
     } catch (error) {
       const sensitiveContent = this.current?.sensitiveContent
+      // A cancelled transfer can still own a durable import that must remain retryable.
+      const recoveryRequired = this.current?.result?.recovery || requiresRecovery?.()
       this.current = {
         ...this.current!,
-        state:
-          controller.signal.aborted && !this.current?.result?.recovery ? 'cancelled' : 'failed',
+        state: controller.signal.aborted && !recoveryRequired ? 'cancelled' : 'failed',
         files: undefined,
         summary: undefined,
         importPreview: undefined,
         error:
-          controller.signal.aborted && !this.current?.result?.recovery
+          controller.signal.aborted && !recoveryRequired
             ? undefined
             : error instanceof Error
               ? error.message

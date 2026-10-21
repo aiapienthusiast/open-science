@@ -45,8 +45,9 @@ set and deferred groups appear in preflight reason chains. Checks retain complet
 each selected group, so this is group selection rather than individual-test pruning. Native supervisor
 consumers keep their Rust source/build prerequisites, and selected-but-skipped steps fail the gate. Complete Windows business/browser variants run
 in the independent Windows E2E Regression workflow.
-Automatic PR checks do not allocate Mac runners, including for platform-sensitive changes;
-Mac validation happens in merge queue.
+PR Gate does not allocate Mac runners, including for platform-sensitive changes;
+its Mac validation happens in merge queue. The separate Process Lifecycle workflow runs
+three native platforms for its declared lifecycle owner and harness paths, as described below.
 PR and queue business E2E rely on one Playwright retry to absorb single-attempt flakes; the
 merged E2E summary reports retry-passed tests, and scheduled Source Regression keeps
 `--fail-on-flaky-tests`.
@@ -60,6 +61,8 @@ planned for every change it carries, not only its own pull request. CI Integrity
 pull request title in the queue because it becomes the squash subject.
 Platform-sensitive changes add focused Darwin sandbox, process/delegation, window/second-launch
 and Notebook checks in that same job. Selected native checks must succeed; skipped is not success.
+The Notebook macOS isolation suite allows one fresh-process retry, retaining both attempts in CI
+logs. A repeated failure remains blocking; release verification keeps its single-attempt policy.
 Queue does not repeat Windows business E2E or complete Mac business/presentation suites. Queue reselects Windows core integration groups for the combined revision; selected checks remain blocking.
 
 ### Platform profiles
@@ -71,9 +74,41 @@ diagnosis. Classification and gate validation continue to use trusted base code.
 
 ### Scheduled regression and publication
 
+Process Lifecycle runs its fixed source process collection daily on
+macOS, Linux and Windows at **19:23 UTC** (02:23 the next day in Asia/Saigon), even when the
+default-branch SHA is unchanged. Its manual `core` and `detector` modes are focused no-publish
+dry-runs. It does not add PR required checks or replace resource/packaged-runtime certification.
+Its runner selects the independent `scripts/ci/process-lifecycle/vitest.config.ts`; ordinary
+module tests do not collect its native suite or count it as portable consumer evidence.
+PRs changing its harness, tested process owners, dynamic Notebook host or declared setup inputs
+also run the same collection at the exact PR head. The workflow's path inventory and discovery
+contract must be updated when scenario dependencies change; it is not an exhaustive transitive
+dependency selector. Unrelated UI/documentation changes do not allocate these native runners.
+The 14 source scenarios retain immediate MCP cancellation/timeout cleanup checks, owned/borrowed
+runtime behavior and recovery. Twelve detector controls verify the observer itself, including
+delayed/failed initial capture, capture deadlines and spawn failure. Workloads start only after their runner has
+been observed, and the orphan control waits for descendant readiness before reparenting.
+Every scenario report must match the run ID, source SHA, harness digest, platform and ordered
+checkpoint inventory. Failure is recorded before emergency cleanup and cannot be erased by it.
+These fixtures do not certify installed upgrades, OS reboot, real provider protocols or Electron
+quit/persistence UI; those retain their existing dedicated validation paths.
+
 Complete Mac Source Regression runs twice daily on `main`, at **01:37 and 13:37 Singapore time**
-(Asia/Singapore, UTC+8), including when main is unchanged. Each round uses one build and one Mac
-runner for functional/workspace journeys, browser/visual/accessibility and supplemental suites.
+(Asia/Singapore, UTC+8), including when main is unchanged. Each round builds once and restores that exact-revision snapshot into eight isolated Mac test jobs:
+functional, workspace, presentation (browser/visual/accessibility), delegation, three ordinary
+supplemental regression shards, and capacity. Electron retains one worker per runner; matrix
+fail-fast is disabled so every group can report its own failures. Capacity is selected from the
+same regression command with `@capacity`, while ordinary shards exclude that tag. No tests are
+removed. Each job uploads distinct group/shard diagnostics, allowing failed jobs to be rerun
+without repeating successful groups while the one-day setup artifact is retained; after expiry,
+start a new run to rebuild it. Setup failure and any failed or missing selected suite fail
+the scheduled outcome.
+
+Source Regression manual modes `functional`, `workspace`, `presentation`, `regressions`, `capacity`
+and `delegation` select the same production jobs. In `regressions` mode, `shard` can select `1`,
+`2`, `3`, or `all`; `full` always runs all three shards regardless of that diagnostic input.
+Existing focused diagnostic modes remain available and never publish or change scheduled issues.
+PR Gate retains its existing groups and non-capacity selection.
 Windows E2E Regression runs daily at **02:17 Singapore time**
 (Asia/Singapore, UTC+8), with the complete functional/workspace/browser suites on three Windows
 test runners and `--fail-on-flaky-tests`. It has its own failure-tracking issue and does not run
@@ -220,7 +255,53 @@ The generated `scripts/ci/module-derived-consumers.json` supplements explicit mo
 selection explanations identify derived tests. See [registration steps](testing.md#module-impact-registration).
 Trusted CI Integrity recomputes the index from Git blobs without executing candidate code and rejects
 missing, stale or invalid evidence. Index changes retain full CI routing and require CI owner review.
+Non-source resource changes anywhere in the repository do not reject an inherited stale index
+when the dependency reader's text inputs and recomputed consumer memberships are unchanged.
+This uses the reader's own JavaScript/TypeScript/JSON input boundary, not a documentation-path
+allowlist. The proof compares the Git merge base and candidate head, including both rename endpoints.
+Resource additions/deletions that change import resolution or invalidate runtime edges still fail.
+Parsed source, JSON configuration, registration, index and mixed changes retain strict validation.
+Standalone index audits remain unconditional; resource ownership and test routing are unchanged.
 Older bases retain legacy rules; existing explicit contracts are not retired automatically.
+Static resource imports also contribute consumer evidence. Current resource consumers are declared
+explicitly in their owning modules so trusted-base verification can preserve coverage while the
+reader is updated. Future additional consumers are captured by the generated index in its existing
+format. Resource edges add coverage without proving a complete dependency cone or authorizing
+consumer retirement.
+
+The consumer-coverage guard requires reachable coverage and a fresh derived index; it does not
+require deleting conservative explicit consumers. A newly complete dependency graph can prove
+current independence without proving historical reachability. Only the trusted base/head
+retirement checks described below authorize removing those existing obligations.
+
+## Actions cache maintenance
+
+The **Clean up closed PR caches** workflow sweeps `refs/pull/<number>/merge` caches after
+PR Gate completes for a PR or merge group. It checks each PR's current state and deletes
+only closed-PR caches, including fork PRs. Open-PR, main, branch and tag caches are preserved;
+a reopened PR may need to populate its cache again.
+
+The privileged workflow uses
+[`workflow_run`](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)
+so both its definition and cleanup script come from main. It does not execute upstream code,
+restore caches or download artifacts. This applies GitHub's
+[closed-PR cache cleanup guidance](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manage-caches)
+without granting write access to a PR-controlled workflow.
+
+A PR closed after its last Gate run is swept by the next Gate completion or a manual run.
+For immediate recovery, run a manual sweep on main. Inspect the dry-run logs before enabling deletion:
+
+```bash
+gh workflow run cache-cleanup.yml --ref main -f dry_run=true
+gh workflow run cache-cleanup.yml --ref main -f dry_run=false
+```
+
+If the shared Windows Notebook runtime cache has already been evicted, run
+`gh workflow run windows-notebook-runtime.yml --ref main` after cleanup. This reuses the
+existing compiler and verification workflow to restore main's cache; PR-scoped caches cannot
+warm main or other PRs. Cache keys and validation remain unchanged. Cleanup reduces quota
+pressure but cannot guarantee retention; a missing runtime cache still triggers compilation.
+No Release assets, Deployments or periodic compiler runs are used.
 
 ## CI control-plane approval
 
@@ -270,6 +351,12 @@ test evidence and routing obligations retained, and every reachable or uncertain
 registered in the new owner. The original shared owner keeps its full-validation marker
 and surviving evidence. This is not a general exception for shared files or package edits;
 merge the protected policy before proposing the registration split.
+The same bounded pure-helper proof permits `src/shared/fuzzy-match.ts` to move into
+`shared_fuzzy_match`, retaining its composer-owned behavior suite as consumer evidence. It does
+not transfer that test's ownership or weaken the original full owner. For this source-only split,
+provably unrelated original contracts remain on the full owner; the target must retain the exact
+composer suite and every reachable or uncertain test from the complete traversal. The existing
+`shared_promise_identity` exception remains limited to the in-flight promise helper and its test.
 Host owners under `src/main/` and `src/renderer/` may split into new modules in a
 registration-only revision with unchanged source and tests. Trusted Integrity verifies that each
 new owner takes paths from exactly one surviving non-full owner, preserves moved interfaces,
@@ -278,10 +365,25 @@ the old execution plan. Explicit contracts, non-host evidence and explicit tests
 provable old source dependency follow the split as well. Moved owner tests keep their owner
 classification in the new module; tests still reaching the remaining owner, or with incomplete
 or unproven old source evidence, must also remain registered there. Original owners containing shared/preload/package sources, full owners (before or after the split), existing-module transfers and
-mixed source/policy edits do not qualify. Host build scripts and test harnesses may remain on the original owner; only main/renderer source paths can transfer. An old consumer registration may follow a verified split
+mixed source/policy edits do not qualify for this split proof. Host build scripts and test harnesses may remain on the original owner; only main/renderer source paths can transfer. An old consumer registration may follow a verified split
 only when complete evidence proves its old dependency and no dependency on the remaining owner;
 uncertain and already-unproven host consumers stay registered. Original contracts and consumer-edge protections remain
 in force. Merge this protected policy before proposing a registration split that depends on it.
+Registration-only transfers between **existing** host owners use a separate preservation proof.
+Only module-impact JSON may change, with unchanged source and test bytes and unambiguous surviving
+paths. Both owners retain their historical interfaces, test buckets, consumer edges, overlays and
+fallback; the destination also retains its existing owner paths and inherits every source test
+obligation, consumer edge (except itself) and overlay with a compatible fallback. Existing test
+classifications stay intact, including a moved test already registered as a destination consumer.
+Only moved public interfaces must be added to the destination; unrelated source interfaces remain
+on the original owner. Trusted Integrity compares actual selected test and capability sets, including
+each revision's derived consumers, for every old source/destination owner and interface path.
+Raw registrations still prove explicit history retention; derived evidence cannot replace it.
+Any selection reduction is rejected. Shared/preload/package
+owners, full markers and mixed source/test/runtime/policy edits do not qualify. This proof grants
+owner-path transfers only: it authorizes no historical test retirement or reclassification and adds
+no manifest flags. Merge the protected policy before proposing a registration transfer that uses it.
+
 Source-changing host transfers have a separate, stricter proof. Exact surviving owner paths
 identify transfers into new or existing host modules, including targets assembled from several
 host owners. All transfers from an original owner must verify before any of its evidence can
@@ -321,10 +423,10 @@ malformed records, unsupported statuses and root-manifest changes retain ordinar
 Registration data never selects its own contract tests. No application or platform behavior
 changes in this data-only path, so it does not launch desktop or Windows runtime suites.
 
-The exact consumer-evidence guard also retains entries when a dependency cone is incomplete
-(for example, a generated native addon or computed import). Absence from a static graph alone
-must not demand removal that trusted Integrity cannot verify. Fully resolved obsolete consumers
-are still rejected; missing consumer coverage is still required. Package boundary checks inspect
+The consumer-evidence guard permits conservative explicit entries even when the current
+dependency cone is fully resolved. Current independence, or an incomplete cone such as a generated
+native addon or computed import, must not demand removal that trusted Integrity cannot verify.
+Derived evidence must stay fresh and reachable consumers must remain covered. Package boundary checks inspect
 the executable test plan: retained historical registrations must not make host-only source edits
 run unchanged upstream package units.
 
